@@ -1,0 +1,11 @@
+node_modules/
+dist/
+dist-*/
+*.local
+.DS_Store
+
+# Local verification harness output (backend tables + stored parts)
+.devtesting/data/
+
+# Deployment data (tables + stored vault bytes) must never be committed.
+/data/

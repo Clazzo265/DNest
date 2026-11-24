@@ -2,6 +2,8 @@ import { db, ws, json, error } from '@appdeploy/sdk';
 
 const SUBSCRIPTIONS_TABLE = 'entity_subscriptions';
 
+type Ctx = { body: unknown };
+
 export type SubscriptionRecord = {
   id: string;
   entity_type: string;
@@ -91,7 +93,7 @@ export async function notifySubscribers(
 
 export const realtimeSubscriptionRoutes = {
   'POST /api/subscriptions': [
-    async ({ body }) => {
+    async ({ body }: Ctx) => {
       const { entity_type, entity_id, connection_id } = (body || {}) as Record<
         string,
         string
@@ -105,7 +107,7 @@ export const realtimeSubscriptionRoutes = {
   ],
 
   'POST /api/subscriptions/remove': [
-    async ({ body }) => {
+    async ({ body }: Ctx) => {
       const { entity_type, entity_id, connection_id } = (body || {}) as Record<
         string,
         string

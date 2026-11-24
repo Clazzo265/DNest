@@ -1,0 +1,24 @@
+# Render blueprint. Deploys the same image CI publishes.
+#
+#   Render Dashboard -> New -> Blueprint -> point at this repository.
+#
+# The disk is required: without it the vault is wiped on every deploy.
+services:
+  - type: web
+    name: datanest
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: 8080
+      - key: DATANEST_DATA_DIR
+        value: /data
+      - key: DATANEST_TRUST_PROXY
+        value: "1"
+    disk:
+      name: datanest-data
+      mountPath: /data
+      sizeGB: 100

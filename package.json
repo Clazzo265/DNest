@@ -1,18 +1,27 @@
 {
-  "name": "vite-react-app",
+  "name": "datanest",
   "private": true,
   "version": "0.0.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "build:web": "vite build",
     "build": "vite build",
-    "preview": "vite preview"
+    "start": "node --import tsx --import ./server/register.ts server/index.ts",
+    "serve": "npm run build && npm start",
+    "prepare:test": "node .devtesting/link.mjs",
+    "pretest": "node .devtesting/link.mjs",
+    "pretypecheck": "node .devtesting/link.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc -p .devtesting/tsconfig.backend.json && tsc --noEmit -p tsconfig.server.json",
+    "test": "tsx --test tests/capacity.test.ts tests/api.test.ts tests/transfer.test.ts tests/download.test.ts tests/scale.test.ts tests/server.test.ts",
+    "harness": "bash .devtesting/serve.sh"
   },
   "dependencies": {
     "lucide-react": "^0.469.0",
     "jszip": "^3.10.1",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "tsx": "^4.19.0"
   },
   "devDependencies": {
     "@types/react": "^19.0.0",
@@ -22,6 +31,8 @@
     "postcss": "^8.4.0",
     "tailwindcss": "^3.4.0",
     "typescript": "^5.7.0",
-    "vite": "^8.0.0"
+    "vite": "^8.0.0",
+    "@types/node": "^22.0.0",
+    "jsdom": "^25.0.0"
   }
 }

@@ -1,0 +1,1 @@
+{ "name": "@appdeploy/sdk", "type": "module", "main": "index.ts", "exports": { ".": "./index.ts" } }
