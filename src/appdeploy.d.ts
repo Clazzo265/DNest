@@ -32,10 +32,19 @@ declare module '@appdeploy/client' {
     delete<T = any>(url: string): Promise<ApiResponse<T>>;
   };
 
+  export type AppUser = { userId: string; email: string; name: string };
+
   export const auth: {
     getUser(): Promise<unknown>;
     signInWithRedirect(): Promise<void>;
     signOut(): Promise<void>;
+    /** Self-hosted build only: cookie session endpoints. */
+    signIn?(input: { email: string; password: string }): Promise<AppUser>;
+    signUp?(input: {
+      email: string;
+      password: string;
+      name?: string;
+    }): Promise<AppUser>;
   };
 
   export type { ApiResponse, ApiError, RequestOptions };

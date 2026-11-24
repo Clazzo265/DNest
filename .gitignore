@@ -6,3 +6,6 @@ dist-*/
 
 # Local verification harness output (backend tables + stored parts)
 .devtesting/data/
+
+# Deployment data (tables + stored vault bytes) must never be committed.
+/data/

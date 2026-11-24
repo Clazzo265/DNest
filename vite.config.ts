@@ -9,6 +9,13 @@ import react from '@vitejs/plugin-react';
  */
 const harness = process.env.DATANEST_DEV_HARNESS === '1';
 
+/**
+ * Production: `npm run build` resolves the platform packages to this
+ * repository's own implementations, which run on the bundled Node server
+ * (`server/`). Nothing here depends on AppDeploy being reachable.
+ */
+const selfHosted = !harness;
+
 export default defineConfig({
   plugins: [react()],
   base: './',
@@ -19,7 +26,14 @@ export default defineConfig({
           '@appdeploy/sdk': '/.devtesting/sdk/index.ts',
         },
       }
-    : undefined,
+    : selfHosted
+      ? {
+          alias: {
+            '@appdeploy/client': '/src/platform/client.ts',
+            '@appdeploy/sdk': '/server/sdk.ts',
+          },
+        }
+      : undefined,
   server: harness
     ? {
         host: '0.0.0.0',

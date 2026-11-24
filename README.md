@@ -109,10 +109,19 @@ before `:index`, or `read` would be parsed as a part number.
 
 ```bash
 npm install
-npm run typecheck   # frontend + backend types
-npm test            # 31 tests: capacity maths, API, transfer, download, scale
+npm run typecheck   # frontend + backend + server types
+npm test            # 42 tests
 DATANEST_SCALE_MB=256 npm test   # bigger scale run
 ```
+
+| Suite | Covers |
+| --- | --- |
+| `tests/capacity.test.ts` | quota maths, part tiling, bitmap sharding |
+| `tests/api.test.ts` | routing, quota enforcement, resume, isolation |
+| `tests/transfer.test.ts` | concurrency, retry, resume, base64 exactness |
+| `tests/download.test.ts` | streaming + fallback byte-identical output |
+| `tests/scale.test.ts` | 64 MB upload, bounded in-flight window |
+| `tests/server.test.ts` | sessions, security headers, request limits, restart durability |
 
 The AppDeploy SDK is injected by the platform and is not published to npm, so
 `.devtesting/` contains dependency-free stand-ins (plus a Node HTTP harness) used
@@ -127,6 +136,59 @@ npm run harness     # backend on :8787, Vite on :5173 proxying /api
 
 `DATANEST_DEV_HARNESS=1` swaps the client adapter for the local stub. The default
 build is unchanged and still expects the platform-injected packages.
+
+## Deployment
+
+DataNest is a self-contained Node service: it serves the built frontend, the API,
+and stores vault bytes on disk. One process, one volume.
+
+### Local / any Docker host
+
+```bash
+docker build -t datanest .
+docker run -d --name datanest -p 8080:8080 \
+  -v datanest-data:/data \
+  datanest
+```
+
+The `-v` is not optional: without it every deploy wipes the vault.
+
+### Without Docker
+
+```bash
+npm ci
+npm run build
+DATANEST_DATA_DIR=/var/lib/datanest PORT=8080 npm start
+```
+
+### Configuration
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PORT` | `8080` | Listen port (binds `0.0.0.0`) |
+| `DATANEST_DATA_DIR` | `./data` | Root for tables + stored parts. **Back this up.** |
+| `DATANEST_STATIC_DIR` | `./dist` | Built frontend |
+| `DATANEST_ORIGIN` | — | Public origin; set to an `https://` URL to mark cookies `Secure` |
+| `DATANEST_TRUST_PROXY` | — | Set `1` behind a TLS-terminating proxy so `X-Forwarded-Proto` is honoured |
+
+### Platform blueprints in this repo
+
+- `.github/workflows/ci.yml` — typecheck, build, 42 tests, server smoke test, Docker build + boot check.
+- `.github/workflows/publish.yml` — pushes `ghcr.io/<owner>/datanest:latest` on green `main`.
+- `Dockerfile` — multi-stage build, non-root user, `/data` volume, healthcheck.
+- `fly.toml`, `render.yaml` — one-command deploys with the required persistent volume.
+
+### Health
+
+`GET /healthz` returns `{"ok":true,"uptime":...}` and is wired into the Docker
+healthcheck and every platform blueprint.
+
+### What "deployed" means here, precisely
+
+This environment can only reach GitHub, so the image is built and published by CI
+rather than started on a public host from this session. The service is verified
+running locally with the full suite, including a restart test that kills the
+process and proves accounts, notes and file bytes come back byte-identical.
 
 ## Operational notes
 

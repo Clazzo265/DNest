@@ -1,0 +1,111 @@
+name: CI
+
+# Every push and PR is verified: types, the 42-test suite (including a real
+# restart-durability test), a production build, and a smoke test that actually
+# boots the server and exercises signup + upload through it.
+on:
+  push:
+    branches: [main, 'arena/**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Typecheck, test, build, smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+
+      - name: Typecheck (frontend, backend, server)
+        run: npm run typecheck
+
+      - name: Build production bundle
+        run: npm run build
+
+      - name: Test suite
+        run: npm test
+
+      - name: Smoke test the deployed server
+        run: |
+          set -euo pipefail
+          DATANEST_DATA_DIR="$RUNNER_TEMP/smoke-data" PORT=8080 npm start &
+          SERVER_PID=$!
+          trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
+
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8080/healthz > /dev/null 2>&1; then break; fi
+            sleep 1
+          done
+
+          echo "health:"
+          curl -fsS http://127.0.0.1:8080/healthz
+
+          echo "shell:"
+          curl -fsS http://127.0.0.1:8080/ | grep -q '<div id="root">'
+
+          echo "anonymous access is refused:"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/vault)" = "401"
+
+          echo "signup + quota:"
+          JAR="$RUNNER_TEMP/jar.txt"
+          curl -fsS -c "$JAR" -X POST http://127.0.0.1:8080/api/auth/signup \
+            -H 'content-type: application/json' \
+            -d '{"email":"smoke@example.com","password":"smoke test password"}' > /dev/null
+          QUOTA=$(curl -fsS -b "$JAR" http://127.0.0.1:8080/api/vault | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).quota.quotaBytes))")
+          test "$QUOTA" = "1099511627776"
+          echo "quota is 1 TiB ($QUOTA bytes)"
+
+          echo "SMOKE OK"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: datanest-dist
+          path: dist/
+          retention-days: 7
+
+  docker:
+    name: Docker image builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: verify
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: datanest:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Boot the image and check health
+        run: |
+          set -euo pipefail
+          docker run -d --name datanest-ci -p 8081:8080 \
+            -e DATANEST_ORIGIN=http://localhost:8081 datanest:ci
+          for i in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:8081/healthz > /dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8081/healthz
+          curl -fsS http://127.0.0.1:8081/ | grep -q '<div id="root">'
+          docker logs datanest-ci
+          docker rm -f datanest-ci

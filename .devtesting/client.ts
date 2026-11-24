@@ -1,4 +1,4 @@
-/** LOCAL TEST HARNESS ONLY: stub for @appdeploy/client used by type-checking. */
+/** LOCAL TEST HARNESS ONLY: stub for @appdeploy/client used by the dev harness. */
 type Call = { url: string; init: RequestInit };
 
 /** Resolved per request so tests can point the adapter at a fresh server. */

@@ -1,0 +1,45 @@
+# Deployment descriptor for Fly.io (or any Fly-compatible platform).
+#
+#   fly launch --no-deploy
+#   fly volumes create datanest_data --size 100 --region <region>
+#   fly deploy
+#
+# The volume is mandatory: vault bytes live on disk, so a machine without one
+# loses everything on restart.
+app = "datanest"
+primary_region = "jnb"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  DATANEST_DATA_DIR = "/data"
+  DATANEST_TRUST_PROXY = "1"
+
+[[mounts]]
+  source = "datanest_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "requests"
+    hard_limit = 250
+    soft_limit = 200
+
+[[http_service.checks]]
+  interval = "30s"
+  timeout = "5s"
+  grace_period = "20s"
+  method = "GET"
+  path = "/healthz"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"

@@ -130,6 +130,13 @@ function App() {
   const [user, setUser] = useState<AppUser | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState('');
+  const [authMode, setAuthMode] = useState<'signin' | 'signup'>('signin');
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authForm, setAuthForm] = useState({
+    name: '',
+    email: '',
+    password: '',
+  });
   const [records, setRecords] = useState<VaultRecord[]>([]);
   const [nextToken, setNextToken] = useState<string | null>(null);
   const [loadingRecords, setLoadingRecords] = useState(false);
@@ -290,12 +297,41 @@ function App() {
     [records]
   );
 
-  async function signIn() {
+  /**
+   * Self-hosted builds authenticate against this server with a cookie session.
+   * If the injected client only supports the platform redirect flow, fall back
+   * to it, so the same bundle works in both environments.
+   */
+  async function submitAuth(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
     setAuthError('');
+    setAuthBusy(true);
     try {
-      await auth.signInWithRedirect();
+      const email = authForm.email.trim();
+      const password = authForm.password;
+      let signedIn: AppUser | null = null;
+
+      if (authMode === 'signup' && auth.signUp) {
+        signedIn = (await auth.signUp({
+          email,
+          password,
+          name: authForm.name.trim(),
+        })) as AppUser;
+      } else if (auth.signIn) {
+        signedIn = (await auth.signIn({ email, password })) as AppUser;
+      } else {
+        await auth.signInWithRedirect();
+        return;
+      }
+
+      setUser(signedIn);
+      setAuthForm({ name: '', email: '', password: '' });
+      await Promise.all([refreshRecords(), refreshVault()]);
+      setToast('Welcome to your vault.');
     } catch (error) {
       setAuthError(getErrorMessage(error));
+    } finally {
+      setAuthBusy(false);
     }
   }
 
@@ -842,11 +878,96 @@ function App() {
               Private to your account, accessible wherever you sign in.
             </p>
           </div>
-          <button className="primary-button auth-button" onClick={signIn}>
-            Sign in or create an account <ArrowUpFromLine size={17} />
+          <form className="auth-form" onSubmit={submitAuth}>
+            {authMode === 'signup' && (
+              <label className="auth-field">
+                <span>Name</span>
+                <input
+                  value={authForm.name}
+                  onChange={event =>
+                    setAuthForm(current => ({
+                      ...current,
+                      name: event.target.value,
+                    }))
+                  }
+                  placeholder="Ada Lovelace"
+                  autoComplete="name"
+                  maxLength={80}
+                />
+              </label>
+            )}
+            <label className="auth-field">
+              <span>Email</span>
+              <input
+                type="email"
+                required
+                value={authForm.email}
+                onChange={event =>
+                  setAuthForm(current => ({
+                    ...current,
+                    email: event.target.value,
+                  }))
+                }
+                placeholder="you@example.com"
+                autoComplete="email"
+              />
+            </label>
+            <label className="auth-field">
+              <span>
+                Password
+                {authMode === 'signup' && (
+                  <em className="auth-hint">at least 10 characters</em>
+                )}
+              </span>
+              <input
+                type="password"
+                required
+                minLength={authMode === 'signup' ? 10 : undefined}
+                value={authForm.password}
+                onChange={event =>
+                  setAuthForm(current => ({
+                    ...current,
+                    password: event.target.value,
+                  }))
+                }
+                placeholder="••••••••••"
+                autoComplete={
+                  authMode === 'signup' ? 'new-password' : 'current-password'
+                }
+              />
+            </label>
+            <button
+              className="primary-button auth-button"
+              type="submit"
+              disabled={authBusy}
+            >
+              {authBusy ? (
+                <>
+                  <LoaderCircle size={17} className="spin" /> Working…
+                </>
+              ) : (
+                <>
+                  {authMode === 'signup' ? 'Create my vault' : 'Sign in'}
+                  <ArrowUpFromLine size={17} />
+                </>
+              )}
+            </button>
+          </form>
+          <button
+            className="auth-switch"
+            type="button"
+            onClick={() => {
+              setAuthMode(current =>
+                current === 'signin' ? 'signup' : 'signin'
+              );
+              setAuthError('');
+            }}
+          >
+            {authMode === 'signin'
+              ? 'New here? Create an account'
+              : 'Already have a vault? Sign in'}
           </button>
-          {authError && <p className="inline-error">{authError}</p>}
-          <div className="auth-foot">
+          {authError && <p className="inline-error">{authError}</p>}          <div className="auth-foot">
             <span>
               <ShieldCheck size={14} /> Private account storage
             </span>
