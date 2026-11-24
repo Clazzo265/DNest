@@ -1,0 +1,89 @@
+[
+  {
+    "name": "Create and retain a private note",
+    "sanity": true,
+    "viewport": "desktop",
+    "covers": [
+      "sign-in restoration",
+      "note creation",
+      "database persistence after reload",
+      "account-scoped records"
+    ],
+    "description": "Verifies a signed-in user can create a note and still see it after reopening the vault.",
+    "steps": [
+      "Sign in as Actor A and open the vault",
+      "Create a note titled Vault check with the content First saved note",
+      "Refresh the page and open All items"
+    ],
+    "expected": "Vault check appears once with the saved content still present."
+  },
+  {
+    "name": "Create, validate and edit structured JSON",
+    "viewport": "desktop",
+    "covers": [
+      "JSON record creation",
+      "JSON syntax validation",
+      "record update",
+      "structured data persistence"
+    ],
+    "description": "Verifies JSON records reject malformed input and retain valid edits.",
+    "steps": [
+      "Create a JSON item titled Settings",
+      "Enter malformed JSON and attempt to save",
+      "Replace it with {\"theme\":\"dark\",\"active\":true}, save, reopen and edit the theme to light"
+    ],
+    "expected": "Malformed JSON is rejected; the valid edited JSON remains saved after reopening."
+  },
+  {
+    "name": "Upload and download an arbitrary file",
+    "viewport": "desktop",
+    "covers": [
+      "file upload start",
+      "chunked binary storage",
+      "upload completion",
+      "file download integrity",
+      "file metadata persistence"
+    ],
+    "description": "Verifies a real small file can be uploaded, stored in parts and downloaded unchanged.",
+    "steps": [
+      "Choose a small text file named sample.txt containing the text DataNest file test",
+      "Wait for the upload to finish and refresh the page",
+      "Open the file item and download the original file"
+    ],
+    "expected": "The file is marked Saved, and the downloaded sample.txt contains the original text."
+  },
+  {
+    "name": "Keep records isolated between accounts",
+    "viewport": "desktop",
+    "covers": [
+      "authenticated API access",
+      "private per-account database tables",
+      "private per-account file paths",
+      "sign-out and sign-in"
+    ],
+    "description": "Verifies one account cannot see another account's saved records.",
+    "steps": [
+      "Actor A signs in and creates a note titled Actor A private item",
+      "Actor A signs out; Actor B signs in with a different account",
+      "Actor B opens All items and searches for Actor A private item"
+    ],
+    "expected": "Actor B cannot see Actor A private item."
+  },
+  {
+    "name": "Validate required fields and confirm deletion",
+    "viewport": "mobile",
+    "covers": [
+      "required-title validation",
+      "mobile composer layout",
+      "destructive-action confirmation",
+      "database delete persistence"
+    ],
+    "description": "Verifies invalid data is blocked and confirmed deletion stays deleted.",
+    "steps": [
+      "Open the new note form and try to save it without a title",
+      "Create a note titled Remove me",
+      "Open it, choose Delete, confirm Delete permanently, then refresh"
+    ],
+    "expected": "The empty title is rejected, and Remove me is no longer visible after refresh."
+  }
+]
