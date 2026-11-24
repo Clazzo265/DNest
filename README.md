@@ -144,6 +144,20 @@ workspace cookie (`datanest_ws`) is used, then the personal workspace. A `?ws=`
 you cannot reach is a hard `403` rather than a silent fallback to a different
 vault.
 
+### Why deep links are served the way they are
+
+The build references its assets relatively (`./assets/index-abc.js`). When a
+browser opens `/join/<workspace>/<token>` it resolves that reference against the
+route and asks for `/join/<workspace>/<token>/assets/index-abc.js`. The server
+therefore falls back through progressively shorter suffixes of a request path
+until it finds a real file, and **never** answers a script or style request with
+the HTML shell — Chrome and Firefox reject a module served as `text/html` under
+`X-Content-Type-Options: nosniff`, which renders a blank page with no error.
+A missing asset now returns `404` rather than a convincing-looking empty app.
+
+If SPA loading ever fails, the shell renders an explicit message instead of a
+blank screen, including when a required script never loads.
+
 ### Usage notes
 
 - A link pointing at `localhost` cannot be opened by anyone else. The UI detects
@@ -175,7 +189,7 @@ before `:index`, or `read` would be parsed as a part number.
 ```bash
 npm install
 npm run typecheck   # frontend + backend + server types
-npm test            # 53 tests
+npm test            # 59 tests
 DATANEST_SCALE_MB=256 npm test   # bigger scale run
 ```
 
@@ -188,6 +202,7 @@ DATANEST_SCALE_MB=256 npm test   # bigger scale run
 | `tests/scale.test.ts` | 64 MB upload, bounded in-flight window |
 | `tests/server.test.ts` | sessions, security headers, request limits, restart durability |
 | `tests/members.test.ts` | shared vaults, role enforcement, invite links, single use, expiry, token hashing |
+| `tests/static.test.ts` | deep-link asset resolution, no HTML for scripts, traversal, shell fallback |
 
 The AppDeploy SDK is injected by the platform and is not published to npm, so
 `.devtesting/` contains dependency-free stand-ins (plus a Node HTTP harness) used

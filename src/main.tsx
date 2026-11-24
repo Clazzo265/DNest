@@ -1,6 +1,7 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App';
+import { BootFailure, ErrorBoundary, useBootGuard } from './Boot';
 import { JoinPage } from './Join';
 import './index.css';
 
@@ -14,8 +15,18 @@ import './index.css';
  */
 const isJoinRoute = /^\/join\/[^/]+/.test(window.location.pathname);
 
+function Root() {
+  // Surfaces the silent-failure case: a script that never loaded leaves an empty
+  // root and, without this, a blank page with no explanation.
+  const problem = useBootGuard();
+  if (problem) return <BootFailure title="The app did not load" detail={problem} />;
+  return isJoinRoute ? <JoinPage onJoined={() => {}} /> : <App />;
+}
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    {isJoinRoute ? <JoinPage onJoined={() => {}} /> : <App />}
+    <ErrorBoundary>
+      <Root />
+    </ErrorBoundary>
   </StrictMode>
 );
