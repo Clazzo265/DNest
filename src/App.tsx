@@ -19,23 +19,41 @@ import {
   FileText,
   FileVideo,
   Folder,
-  FolderOpen,
   HardDrive,
   LoaderCircle,
   LogOut,
   Menu,
   MoreHorizontal,
+  Pause,
   Pencil,
   Plus,
+  RefreshCw,
   Search,
   ShieldCheck,
   Sparkles,
   Tag,
   Trash2,
   Upload,
-  UserRound,
   X,
+  Zap,
 } from 'lucide-react';
+import {
+  BLOB_DOWNLOAD_SAFE_LIMIT,
+  type Quota,
+  type DownloadProgress,
+  type Limits,
+  type TransferProgress,
+  downloadFile as transferDownload,
+  errorMessage,
+  fetchVault,
+  formatBytes,
+  formatDuration,
+  reconcileVault,
+  safeFilename,
+  saveTextFile,
+  sweepVault,
+  uploadFile,
+} from './transfer';
 import './index.css';
 
 type AppUser = {
@@ -56,7 +74,8 @@ type VaultRecord = {
   size?: number;
   mimeType?: string;
   expectedChunks?: number;
-  uploadedChunks?: number[];
+  receivedParts?: number;
+  receivedBytes?: number;
   status?: 'uploading' | 'ready';
   createdAt: string;
   updatedAt: string;
@@ -64,31 +83,17 @@ type VaultRecord = {
 
 type ComposerKind = 'note' | 'json';
 
-const CHUNK_SIZE = 1024 * 1024;
+const getErrorMessage = errorMessage;
 
-function getErrorMessage(value: unknown): string {
-  if (value && typeof value === 'object') {
-    const candidate = value as {
-      message?: string;
-      response?: { data?: { error?: string; message?: string } };
-    };
-    return (
-      candidate.response?.data?.error ||
-      candidate.response?.data?.message ||
-      candidate.message ||
-      'Something went wrong. Please try again.'
-    );
-  }
-  return 'Something went wrong. Please try again.';
-}
-
-function formatBytes(bytes = 0): string {
-  if (bytes < 1024) return bytes + ' B';
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-  if (bytes < 1024 * 1024 * 1024)
-    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-  return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
-}
+type TransferJob = {
+  key: string;
+  name: string;
+  size: number;
+  progress: TransferProgress | null;
+  status: 'queued' | 'active' | 'done' | 'failed' | 'cancelled';
+  id?: string;
+  message?: string;
+};
 
 function formatDate(value?: string): string {
   if (!value) return 'Just now';
@@ -100,38 +105,6 @@ function formatDate(value?: string): string {
     year:
       date.getFullYear() === new Date().getFullYear() ? undefined : 'numeric',
   }).format(date);
-}
-
-function safeFilename(value: string): string {
-  return (
-    value
-      .replace(/[<>:"/\\|?*\u0000-\u001F]/g, '-')
-      .trim()
-      .slice(0, 120) || 'untitled'
-  );
-}
-
-function fileToBase64(file: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () =>
-      reject(new Error('The selected file could not be read.'));
-    reader.onload = () => {
-      const result = String(reader.result || '');
-      const comma = result.indexOf(',');
-      resolve(comma >= 0 ? result.slice(comma + 1) : '');
-    };
-    reader.readAsDataURL(file);
-  });
-}
-
-function base64ToBytes(value: string): Uint8Array {
-  const binary = atob(value);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
-  return bytes;
 }
 
 function RecordGlyph({
@@ -177,14 +150,34 @@ function App() {
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState(0);
-  const [uploadLabel, setUploadLabel] = useState('');
+  const [jobs, setJobs] = useState<TransferJob[]>([]);
+  const [activeJob, setActiveJob] = useState('');
+  const [quota, setQuota] = useState<Quota | null>(null);
+  const [limits, setLimits] = useState<Limits | null>(null);
+  const [downloadState, setDownloadState] = useState<{
+    id: string;
+    progress: DownloadProgress | null;
+  } | null>(null);
+  const [maintenanceBusy, setMaintenanceBusy] = useState('');
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
+  const [exportLabel, setExportLabel] = useState('');
   const [toast, setToast] = useState('');
   const [pageError, setPageError] = useState('');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const uploadHandle = useRef<ReturnType<typeof uploadFile> | null>(null);
+  const downloadAbort = useRef<AbortController | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+
+  async function refreshVault() {
+    try {
+      const state = await fetchVault();
+      setQuota(state.quota);
+      setLimits(state.limits);
+    } catch {
+      /* quota display is non-critical; records still work */
+    }
+  }
 
   async function refreshRecords() {
     setLoadingRecords(true);
@@ -230,7 +223,7 @@ function App() {
         if (!active) return;
         setUser(restored);
         setAuthLoading(false);
-        if (restored) await refreshRecords();
+        if (restored) await Promise.all([refreshRecords(), refreshVault()]);
       } catch (error) {
         if (!active) return;
         setAuthError(getErrorMessage(error));
@@ -384,123 +377,189 @@ function App() {
     }
   }
 
-  async function uploadSelectedFile(file?: File) {
-    if (!file) return;
+  /**
+   * Upload through the concurrent transfer engine. The engine resumes from the
+   * server's own part map, so a failed or cancelled upload can be picked up
+   * again without re-sending anything that already landed.
+   */
+  function startTransfer(file: File, resumeId?: string) {
+    const key = resumeId || file.name + ':' + file.size + ':' + file.lastModified;
     setUploading(true);
-    setUploadProgress(0);
-    setUploadLabel(file.name);
+    setActiveJob(key);
     setPageError('');
+    setJobs(current => {
+      const others = current.filter(job => job.key !== key);
+      return [
+        {
+          key,
+          name: file.name,
+          size: file.size,
+          progress: null,
+          status: 'active' as const,
+          id: resumeId,
+        },
+        ...others,
+      ].slice(0, 40);
+    });
 
-    let uploadId = '';
-    try {
-      const start = await api.post('/api/files/start', {
-        name: file.name,
-        size: file.size,
-        mimeType: file.type || 'application/octet-stream',
-        folder: '',
-        tags: [],
+    const handle = uploadFile(file, {
+      resumeId,
+      onStarted: id => {
+        setJobs(current =>
+          current.map(job => (job.key === key ? { ...job, id } : job))
+        );
+      },
+      onProgress: progress => {
+        setJobs(current =>
+          current.map(job => (job.key === key ? { ...job, progress } : job))
+        );
+      },
+      onQuota: next => setQuota(next),
+    });
+    uploadHandle.current = handle;
+
+    void handle.promise
+      .then(async result => {
+        setJobs(current =>
+          current.map(job =>
+            job.key === key ? { ...job, status: 'done', id: result.id } : job
+          )
+        );
+        if (result.quota) setQuota(result.quota);
+        setToast(file.name + ' is saved in your vault.');
+        await Promise.all([refreshRecords(), refreshVault()]);
+      })
+      .catch(error => {
+        const message = getErrorMessage(error);
+        const cancelled = message.toLowerCase().includes('cancel');
+        setJobs(current =>
+          current.map(job =>
+            job.key === key
+              ? {
+                  ...job,
+                  status: cancelled ? 'cancelled' : 'failed',
+                  message,
+                }
+              : job
+          )
+        );
+        if (!cancelled) setPageError(message);
+        else setToast('Upload paused. You can resume it from the transfer panel.');
+        void refreshRecords();
+      })
+      .finally(() => {
+        setUploading(false);
+        setActiveJob('');
+        if (fileInput.current) fileInput.current.value = '';
       });
-      uploadId = String(start.data.id);
-      const expectedChunks = Number(start.data.expectedChunks);
-      const chunkSize = Number(start.data.chunkSize) || CHUNK_SIZE;
+  }
 
-      for (let index = 0; index < expectedChunks; index += 1) {
-        const part = file.slice(
-          index * chunkSize,
-          Math.min(file.size, (index + 1) * chunkSize)
+  async function uploadSelectedFiles(files?: FileList | null) {
+    if (!files?.length) return;
+    const list = Array.from(files);
+
+    // Validate against the published limits before sending a single byte.
+    if (limits) {
+      const tooBig = list.find(file => file.size > limits.maxFileSize);
+      if (tooBig) {
+        setPageError(
+          tooBig.name +
+            ' is larger than the maximum single file size of ' +
+            formatBytes(limits.maxFileSize) +
+            '.'
         );
-        const base64 = await fileToBase64(part);
-        await api.post(
-          '/api/files/' + encodeURIComponent(uploadId) + '/chunks/' + index,
-          { base64 }
-        );
-        setUploadProgress(Math.round(((index + 1) / expectedChunks) * 100));
+        return;
       }
+      const incoming = list.reduce((total, file) => total + file.size, 0);
+      if (quota && incoming > quota.remainingBytes) {
+        setPageError(
+          'These files need ' +
+            formatBytes(incoming) +
+            ' but only ' +
+            formatBytes(quota.remainingBytes) +
+            ' is left in your vault. Free up space or upload fewer files.'
+        );
+        return;
+      }
+    }
 
-      await api.post(
-        '/api/files/' + encodeURIComponent(uploadId) + '/complete',
-        {}
-      );
-      setToast('File safely added to your vault.');
-      await refreshRecords();
-    } catch (error) {
-      setToast(
-        getErrorMessage(error) +
-          ' An incomplete upload may remain in your vault; you can remove it.'
-      );
-      await refreshRecords();
-    } finally {
-      setUploading(false);
-      setUploadProgress(0);
-      setUploadLabel('');
-      if (fileInput.current) fileInput.current.value = '';
+    for (const file of list) {
+      startTransfer(file);
     }
   }
 
-  async function downloadFile(item: VaultRecord) {
-    if (item.status !== 'ready') {
-      setToast('This upload is not complete yet.');
+  function pauseUpload() {
+    uploadHandle.current?.cancel();
+    setToast('Stopping the upload. Parts already sent are kept.');
+  }
+
+  async function resumeJob(job: TransferJob) {
+    if (!job.id) {
+      setToast('This upload has no server record to resume from.');
       return;
     }
-    setToast('Preparing ' + item.title + '…');
+    const file = fileInput.current?.files?.[0];
+    if (!file) {
+      setToast('Choose the same file again to resume this upload.');
+      return;
+    }
+    startTransfer(file, job.id);
+  }
+
+  async function downloadItem(item: VaultRecord) {
+    if (item.status !== 'ready') {
+      setToast('This upload has not finished yet.');
+      return;
+    }
+    const controller = new AbortController();
+    downloadAbort.current = controller;
+    setDownloadState({ id: item.id, progress: null });
+    setPageError('');
+
     try {
-      const expected = Number(item.expectedChunks || 0);
-      const parts: Uint8Array[] = [];
-      let total = 0;
-
-      for (let index = 0; index < expected; index += 1) {
-        const response = await api.get(
-          '/api/files/' + encodeURIComponent(item.id) + '/chunks/' + index
-        );
-        const bytes = base64ToBytes(response.data.base64);
-        parts.push(bytes);
-        total += bytes.length;
-      }
-
-      const merged = new Uint8Array(total);
-      let offset = 0;
-      for (const part of parts) {
-        merged.set(part, offset);
-        offset += part.length;
-      }
-
-      const blob = new Blob([merged], {
-        type: item.mimeType || 'application/octet-stream',
-      });
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement('a');
-      anchor.href = url;
-      anchor.download = item.name || item.title;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 30000);
-      setToast('Download ready.');
+      const mode = await transferDownload(
+        {
+          id: item.id,
+          name: item.name,
+          title: item.title,
+          size: item.size,
+          mimeType: item.mimeType,
+        },
+        {
+          signal: controller.signal,
+          onProgress: progress =>
+            setDownloadState({ id: item.id, progress }),
+        }
+      );
+      setToast(
+        mode === 'streamed'
+          ? item.title + ' was written straight to disk.'
+          : item.title + ' downloaded.'
+      );
     } catch (error) {
-      setToast(getErrorMessage(error));
+      const message = getErrorMessage(error);
+      const aborted = String((error as Error)?.name || '') === 'AbortError';
+      if (aborted) setToast('Download cancelled.');
+      else setPageError(message);
+    } finally {
+      setDownloadState(null);
+      downloadAbort.current = null;
     }
   }
 
-  function exportTextRecord(item: VaultRecord) {
-    const content = item.content || '';
-    const blob = new Blob([content], {
-      type:
-        item.kind === 'json' ? 'application/json' : 'text/plain;charset=utf-8',
-    });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download =
-      safeFilename(item.title) + (item.kind === 'json' ? '.json' : '.txt');
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 30000);
+  function cancelDownload() {
+    downloadAbort.current?.abort();
   }
 
+  /**
+   * Backup export. Files are pulled in bounded batches so a vault containing a
+   * large file cannot blow the heap; the manifest is always written even when
+   * some file bodies are skipped, so the backup stays a valid index.
+   */
   async function exportBackup() {
     setExporting(true);
     setExportProgress(0);
+    setExportLabel('Collecting records');
     setPageError('');
 
     try {
@@ -519,26 +578,23 @@ function App() {
         all.push(...(data.items || []));
         token = data.nextToken || null;
         pages += 1;
-        if (pages > 200)
+        if (pages > 2_000)
           throw new Error(
-            'The backup is too large to export in one operation. Export smaller sets separately.'
+            'This vault has too many items to index in one export. Export folders separately.'
           );
-        setExportProgress(
-          Math.min(
-            18,
-            Math.round((pages / Math.max(pages + (token ? 1 : 0), 1)) * 18)
-          )
-        );
+        setExportProgress(Math.min(10, Math.round((pages / 50) * 10)));
       } while (token);
 
       const zip = new JSZip();
       const manifestItems: Record<string, unknown>[] = [];
-      const readyFiles = all.filter(
-        item => item.kind === 'file' && item.status === 'ready'
+      const skipped: { id: string; reason: string }[] = [];
+      const totalBytes = all.reduce(
+        (sum, item) => sum + (Number(item.size) || 0),
+        0
       );
+      let processed = 0;
 
-      for (let index = 0; index < all.length; index += 1) {
-        const item = all[index];
+      for (const item of all) {
         const metadata = {
           id: item.id,
           kind: item.kind,
@@ -558,25 +614,63 @@ function App() {
           const extension = item.kind === 'json' ? '.json' : '.txt';
           zip.file('records/' + item.id + extension, item.content || '');
         } else if (item.status === 'ready') {
-          const expected = Number(item.expectedChunks || 0);
-          const output = new Uint8Array(Number(item.size || 0));
-          let offset = 0;
-          for (let part = 0; part < expected; part += 1) {
-            const response = await api.get(
-              '/api/files/' + encodeURIComponent(item.id) + '/chunks/' + part
+          // Guard rail: the ZIP is built in client memory, so very large files
+          // are listed in the manifest instead of silently killing the tab.
+          if ((Number(item.size) || 0) > BLOB_DOWNLOAD_SAFE_LIMIT) {
+            skipped.push({
+              id: item.id,
+              reason: 'larger than the in-browser backup limit',
+            });
+          } else {
+            const statusResponse = await api.get(
+              '/api/files/' + encodeURIComponent(item.id) + '/status',
+              { params: { from: '0', limit: '1' } }
             );
-            const bytes = base64ToBytes(response.data.base64);
-            output.set(bytes, offset);
-            offset += bytes.length;
+            const partsTotal = Number(statusResponse.data.expectedChunks) || 0;
+            const output = new Uint8Array(Number(item.size) || 0);
+            let offset = 0;
+            for (let start = 0; start < partsTotal; start += 8) {
+              const indexes: number[] = [];
+              for (
+                let index = start;
+                index < Math.min(partsTotal, start + 8);
+                index += 1
+              ) {
+                indexes.push(index);
+              }
+              const response = await api.post(
+                '/api/files/' + encodeURIComponent(item.id) + '/chunks/read',
+                { indexes }
+              );
+              for (const part of (response.data as {
+                parts: { base64: string }[];
+              }).parts) {
+                const binary = atob(part.base64);
+                for (let index = 0; index < binary.length; index += 1) {
+                  output[offset + index] = binary.charCodeAt(index);
+                }
+                offset += binary.length;
+              }
+              setExportLabel('Packing ' + item.title);
+              setExportProgress(
+                10 +
+                  Math.round(
+                    (Math.min(offset, Number(item.size) || 1) /
+                      Math.max(Number(item.size) || 1, 1)) *
+                      60 *
+                      (1 / Math.max(all.length, 1))
+                  )
+              );
+            }
+            zip.file(
+              'files/' + item.id + '/' + safeFilename(item.name || item.title),
+              output
+            );
           }
-          zip.file(
-            'files/' + item.id + '/' + safeFilename(item.name || item.title),
-            output
-          );
         }
-        setExportProgress(
-          18 + Math.round(((index + 1) / Math.max(all.length, 1)) * 62)
-        );
+
+        processed += 1;
+        setExportProgress(10 + Math.round((processed / Math.max(all.length, 1)) * 60));
       }
 
       zip.file(
@@ -586,7 +680,14 @@ function App() {
             product: 'DataNest',
             exportedAt: new Date().toISOString(),
             itemCount: all.length,
-            readyFileCount: readyFiles.length,
+            totalBytes,
+            quota: quota
+              ? {
+                  quotaBytes: quota.quotaBytes,
+                  usedBytes: quota.usedBytes,
+                }
+              : null,
+            skipped,
             items: manifestItems,
           },
           null,
@@ -594,8 +695,9 @@ function App() {
         )
       );
 
+      setExportLabel('Compressing archive');
       const blob = await zip.generateAsync({ type: 'blob' }, metadata => {
-        setExportProgress(80 + Math.round(metadata.percent * 0.2));
+        setExportProgress(70 + Math.round(metadata.percent * 0.3));
       });
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement('a');
@@ -605,13 +707,60 @@ function App() {
       document.body.appendChild(anchor);
       anchor.click();
       anchor.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 30000);
-      setToast('Your backup is ready. Keep a copy somewhere safe.');
+      window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+      setToast(
+        skipped.length
+          ? 'Backup ready. ' +
+              skipped.length +
+              ' large file(s) are listed in the manifest only.'
+          : 'Your backup is ready. Keep a copy somewhere safe.'
+      );
     } catch (error) {
       setToast(getErrorMessage(error));
     } finally {
       setExporting(false);
       setExportProgress(0);
+      setExportLabel('');
+    }
+  }
+
+  function exportTextRecord(item: VaultRecord) {
+    const extension = item.kind === 'json' ? '.json' : '.txt';
+    saveTextFile(
+      safeFilename(item.title) + extension,
+      item.content || ''
+    );
+  }
+
+  async function runMaintenance(action: 'reconcile' | 'sweep') {
+    setMaintenanceBusy(action);
+    try {
+      if (action === 'reconcile') {
+        const result = await reconcileVault();
+        setQuota(result.quota);
+        setToast(
+          'Usage verified against stored parts (' +
+            result.parts.toLocaleString() +
+            ' parts).'
+        );
+      } else {
+        const result = await sweepVault();
+        setQuota(result.quota);
+        setToast(
+          result.reclaimed
+            ? 'Reclaimed ' +
+                formatBytes(result.reclaimedBytes) +
+                ' from ' +
+                result.reclaimed +
+                ' abandoned upload(s).'
+            : 'No abandoned uploads to clean up.'
+        );
+        await refreshRecords();
+      }
+    } catch (error) {
+      setPageError(getErrorMessage(error));
+    } finally {
+      setMaintenanceBusy('');
     }
   }
 
@@ -714,7 +863,8 @@ function App() {
         ref={fileInput}
         className="hidden-input"
         type="file"
-        onChange={event => void uploadSelectedFile(event.target.files?.[0])}
+        multiple
+        onChange={event => void uploadSelectedFiles(event.target.files)}
       />
 
       <aside className={'sidebar ' + (mobileMenuOpen ? 'sidebar-open' : '')}>
@@ -823,10 +973,30 @@ function App() {
               <ShieldCheck size={17} />
             </div>
             <div>
-              <strong>Your data stays yours</strong>
-              <span>Private to your account</span>
+              <strong>{quota ? formatBytes(quota.usedBytes) + ' of 1 TB' : '1 TB vault'}</strong>
+              <span>
+                {quota
+                  ? formatBytes(quota.remainingBytes) + ' available'
+                  : 'Private to your account'}
+              </span>
             </div>
           </div>
+          {quota && (
+            <div className="quota-meter" aria-label="Vault usage">
+              <div className="quota-meter-track">
+                <span
+                  className={
+                    quota.percentUsed > 90 ? 'quota-fill danger' : 'quota-fill'
+                  }
+                  style={{ width: Math.max(1, quota.percentUsed) + '%' }}
+                />
+              </div>
+              <div className="quota-meter-text">
+                <span>{quota.percentUsed.toFixed(1)}% used</span>
+                <span>{quota.fileCount + quota.recordCount} items</span>
+              </div>
+            </div>
+          )}
           <div className="profile-row">
             <div className="avatar">
               {(displayName[0] || 'U').toUpperCase()}
@@ -950,12 +1120,102 @@ function App() {
                 <Cloud size={19} />
               </div>
               <div>
-                <strong>Free cloud vault</strong>
-                <span>Usage follows platform limits</span>
+                <strong>
+                  {quota ? formatBytes(quota.usedBytes) : '0 B'} of 1 TB used
+                </strong>
+                <span>
+                  {quota
+                    ? formatBytes(quota.remainingBytes) + ' still available'
+                    : 'Quota enforced per account'}
+                </span>
               </div>
               <ShieldCheck size={18} className="plan-shield" />
             </div>
           </div>
+
+          {quota && (
+            <div className="vault-capacity">
+              <div className="capacity-head">
+                <div>
+                  <span className="eyebrow">VAULT CAPACITY</span>
+                  <strong>
+                    {formatBytes(quota.usedBytes + quota.reservedBytes)} / 1 TB
+                  </strong>
+                </div>
+                <div className="capacity-actions">
+                  <button
+                    className="ghost-button"
+                    onClick={() => void runMaintenance('sweep')}
+                    disabled={maintenanceBusy !== ''}
+                    title="Release space held by abandoned uploads"
+                  >
+                    {maintenanceBusy === 'sweep' ? (
+                      <LoaderCircle size={14} className="spin" />
+                    ) : (
+                      <Zap size={14} />
+                    )}
+                    Reclaim space
+                  </button>
+                  <button
+                    className="ghost-button"
+                    onClick={() => void runMaintenance('reconcile')}
+                    disabled={maintenanceBusy !== ''}
+                    title="Recompute usage from stored parts"
+                  >
+                    {maintenanceBusy === 'reconcile' ? (
+                      <LoaderCircle size={14} className="spin" />
+                    ) : (
+                      <RefreshCw size={14} />
+                    )}
+                    Verify usage
+                  </button>
+                </div>
+              </div>
+              <div className="capacity-track">
+                <span
+                  className="capacity-used"
+                  style={{
+                    width:
+                      Math.max(
+                        0.4,
+                        (quota.usedBytes / quota.quotaBytes) * 100
+                      ) + '%',
+                  }}
+                />
+                {quota.reservedBytes > 0 && (
+                  <span
+                    className="capacity-reserved"
+                    style={{
+                      left: (quota.usedBytes / quota.quotaBytes) * 100 + '%',
+                      width: Math.min(
+                        100,
+                        (quota.reservedBytes / quota.quotaBytes) * 100
+                      ) + '%',
+                    }}
+                  />
+                )}
+              </div>
+              <div className="capacity-legend">
+                <span>
+                  <i className="dot used" /> {formatBytes(quota.usedBytes)} saved
+                </span>
+                {quota.reservedBytes > 0 && (
+                  <span>
+                    <i className="dot reserved" />{' '}
+                    {formatBytes(quota.reservedBytes)} in flight
+                  </span>
+                )}
+                <span>
+                  <i className="dot free" /> {formatBytes(quota.remainingBytes)}{' '}
+                  free
+                </span>
+                <span className="capacity-limits">
+                  Max file {formatBytes(limits?.maxFileSize ?? quota.quotaBytes)} ·
+                  parts {formatBytes(limits?.chunkSize ?? 1048576)}
+                </span>
+              </div>
+            </div>
+          )}
 
           <section className="library-section">
             <div className="section-heading">
@@ -979,7 +1239,6 @@ function App() {
                 <button
                   className="action-button upload-action"
                   onClick={() => fileInput.current?.click()}
-                  disabled={uploading}
                 >
                   <Upload size={16} /> Upload
                 </button>
@@ -1010,19 +1269,112 @@ function App() {
               </div>
             </div>
 
-            {uploading && (
-              <div className="progress-panel">
+            {jobs.length > 0 && (
+              <div className="transfer-panel">
+                <div className="transfer-head">
+                  <strong>
+                    <ArrowUpFromLine size={15} /> Transfers
+                  </strong>
+                  <button
+                    className="ghost-button"
+                    onClick={() => setJobs([])}
+                    disabled={uploading}
+                  >
+                    Clear finished
+                  </button>
+                </div>
+                <ul className="transfer-list">
+                  {jobs.slice(0, 6).map(job => (
+                    <li key={job.key} className={'transfer-row ' + job.status}>
+                      <div className="transfer-copy">
+                        <strong>{job.name}</strong>
+                        <span>
+                          {formatBytes(job.size)}
+                          {job.progress &&
+                            ' · ' +
+                              formatBytes(Math.round(job.progress.bytesPerSecond)) +
+                              '/s · ' +
+                              formatDuration(job.progress.etaSeconds) +
+                              ' left'}
+                          {job.status === 'done' && ' · Saved'}
+                          {job.status === 'cancelled' && ' · Paused'}
+                          {job.status === 'failed' && ' · ' + (job.message || 'Failed')}
+                        </span>
+                        <div className="progress-track">
+                          <span
+                            style={{
+                              width:
+                                (job.status === 'done'
+                                  ? 100
+                                  : job.progress?.percent || 0) + '%',
+                            }}
+                          />
+                        </div>
+                      </div>
+                      <div className="transfer-actions">
+                        {job.status === 'active' && (
+                          <>
+                            <span className="progress-percent">
+                              {job.progress?.percent || 0}%
+                            </span>
+                            {activeJob === job.key && (
+                              <button
+                                className="icon-button"
+                                onClick={pauseUpload}
+                                title="Pause upload"
+                                aria-label="Pause upload"
+                              >
+                                <Pause size={15} />
+                              </button>
+                            )}
+                          </>
+                        )}
+                        {(job.status === 'cancelled' || job.status === 'failed') && (
+                          <button
+                            className="ghost-button"
+                            onClick={() => void resumeJob(job)}
+                          >
+                            Resume
+                          </button>
+                        )}
+                        {job.status === 'done' && (
+                          <span className="transfer-done">
+                            <Check size={14} />
+                          </span>
+                        )}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {downloadState && (
+              <div className="progress-panel download-panel">
                 <div className="progress-icon">
-                  <Upload size={17} />
+                  <Download size={17} />
                 </div>
                 <div className="progress-copy">
-                  <strong>Uploading {uploadLabel}</strong>
-                  <span>{uploadProgress}% complete · Keep this tab open</span>
+                  <strong>Downloading file</strong>
+                  <span>
+                    {downloadState.progress
+                      ? downloadState.progress.percent +
+                        '% · ' +
+                        formatBytes(downloadState.progress.bytesDone) +
+                        ' of ' +
+                        formatBytes(downloadState.progress.bytesTotal)
+                      : 'Reading file parts…'}
+                  </span>
                   <div className="progress-track">
-                    <span style={{ width: uploadProgress + '%' }} />
+                    <span
+                      style={{
+                        width: (downloadState.progress?.percent || 0) + '%',
+                      }}
+                    />
                   </div>
                 </div>
-                <span className="progress-percent">{uploadProgress}%</span>
+                <button className="ghost-button" onClick={cancelDownload}>
+                  Cancel
+                </button>
               </div>
             )}
             {exporting && (
@@ -1032,7 +1384,7 @@ function App() {
                 </div>
                 <div className="progress-copy">
                   <strong>Building your backup</strong>
-                  <span>Collecting records and file contents</span>
+                  <span>{exportLabel || 'Collecting records and file contents'}</span>
                   <div className="progress-track">
                     <span style={{ width: exportProgress + '%' }} />
                   </div>
@@ -1432,12 +1784,31 @@ function App() {
                   {formatBytes(selected.size)}
                 </span>
                 {selected.status === 'ready' ? (
-                  <button
-                    className="primary-button"
-                    onClick={() => void downloadFile(selected)}
-                  >
-                    <Download size={16} /> Download original file
-                  </button>
+                  <>
+                    <button
+                      className="primary-button"
+                      onClick={() => void downloadItem(selected)}
+                      disabled={downloadState !== null}
+                    >
+                      {downloadState?.id === selected.id ? (
+                        <LoaderCircle size={16} className="spin" />
+                      ) : (
+                        <Download size={16} />
+                      )}
+                      {downloadState?.id === selected.id
+                        ? 'Downloading ' +
+                          (downloadState.progress?.percent || 0) +
+                          '%'
+                        : 'Download original file'}
+                    </button>
+                    {(selected.size || 0) > BLOB_DOWNLOAD_SAFE_LIMIT && (
+                      <p className="hint-text">
+                        Large file: this browser will save it in chunks straight
+                        to disk where supported, otherwise it must be held in
+                        memory.
+                      </p>
+                    )}
+                  </>
                 ) : (
                   <div className="warning-note">
                     This upload did not finish. Remove it and upload the file

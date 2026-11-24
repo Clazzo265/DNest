@@ -85,5 +85,68 @@
       "Open it, choose Delete, confirm Delete permanently, then refresh"
     ],
     "expected": "The empty title is rejected, and Remove me is no longer visible after refresh."
+  },
+  {
+    "name": "Vault enforces and displays a 1 TB quota",
+    "viewport": "desktop",
+    "covers": [
+      "quota accounting",
+      "capacity display",
+      "usage enforcement"
+    ],
+    "description": "Verifies the sidebar and capacity panel show real usage against the enforced 1 TiB limit, and that the numbers come from the server.",
+    "steps": [
+      "Sign in and open the vault",
+      "Read the capacity panel and sidebar usage meter",
+      "Upload a file and confirm the used figure increases by its size"
+    ],
+    "expected": "Capacity shows used / 1 TB with a live meter, and usage rises by exactly the uploaded size."
+  },
+  {
+    "name": "Upload resumes after an interruption",
+    "viewport": "desktop",
+    "covers": [
+      "resumable upload",
+      "bounded concurrency",
+      "part accounting"
+    ],
+    "description": "Verifies a paused upload keeps its stored parts and resumes without re-sending them.",
+    "steps": [
+      "Upload a multi-part file and pause it part-way",
+      "Confirm the transfer row shows Paused",
+      "Resume with the same file and wait for Saved"
+    ],
+    "expected": "The upload completes, and already-sent parts are not re-sent."
+  },
+  {
+    "name": "Space is reclaimed from abandoned uploads",
+    "viewport": "desktop",
+    "covers": [
+      "quota release",
+      "maintenance actions"
+    ],
+    "description": "Verifies the reclaim action releases space held by an unfinished upload.",
+    "steps": [
+      "Start a large upload and cancel it",
+      "Use Reclaim space in the capacity panel",
+      "Check the in-flight figure drops to zero"
+    ],
+    "expected": "Reserved space returns to the free pool and usage reconciles."
+  },
+  {
+    "name": "Large download streams to disk with progress",
+    "viewport": "desktop",
+    "covers": [
+      "streaming download",
+      "progress reporting",
+      "integrity"
+    ],
+    "description": "Verifies a stored file downloads unchanged through the batched streaming path.",
+    "steps": [
+      "Upload a file larger than a few parts",
+      "Open it and start the download",
+      "Compare the saved file with the original"
+    ],
+    "expected": "Progress advances in batches and the saved file is byte-identical."
   }
 ]

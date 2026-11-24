@@ -1675,3 +1675,252 @@ textarea:focus-visible,
     font-size: 8px;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   1 TB capacity UI
+   The vault now enforces a real quota, so usage has to be visible: a sidebar
+   meter, a capacity bar with committed vs in-flight bytes, a transfer queue and
+   download progress that stays honest for very large files.
+--------------------------------------------------------------------------- */
+
+.quota-meter {
+  margin: -4px 0 14px;
+  padding: 0 11px;
+}
+.quota-meter-track {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 6px;
+  background: rgba(139, 199, 194, 0.14);
+}
+.quota-fill {
+  height: 100%;
+  display: block;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #62d7cc, #67adff);
+  transition: width 0.4s ease;
+}
+.quota-fill.danger {
+  background: linear-gradient(90deg, #ffb26b, #ff7382);
+}
+.quota-meter-text {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 6px;
+  color: #6d8898;
+  font-size: 9px;
+  letter-spacing: 0.02em;
+}
+
+.vault-capacity {
+  margin-bottom: 26px;
+  padding: 16px 18px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: linear-gradient(
+    135deg,
+    rgba(20, 45, 68, 0.72),
+    rgba(12, 25, 40, 0.82)
+  );
+}
+.capacity-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 13px;
+}
+.capacity-head .eyebrow {
+  display: block;
+  margin-bottom: 5px;
+}
+.capacity-head strong {
+  color: var(--text);
+  font-size: 16px;
+  letter-spacing: -0.01em;
+}
+.capacity-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ghost-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 11px;
+  color: #a9c4d8;
+  font-size: 11px;
+  border: 1px solid rgba(153, 185, 222, 0.18);
+  border-radius: 9px;
+  background: rgba(20, 40, 60, 0.5);
+  transition: all 0.18s ease;
+}
+.ghost-button:hover:not(:disabled) {
+  color: #dff2ff;
+  border-color: rgba(103, 173, 255, 0.4);
+  background: rgba(31, 74, 116, 0.55);
+}
+.capacity-track {
+  position: relative;
+  height: 10px;
+  overflow: hidden;
+  border-radius: 8px;
+  background: rgba(139, 199, 194, 0.1);
+}
+.capacity-used {
+  position: absolute;
+  inset: 0 auto 0 0;
+  display: block;
+  border-radius: 8px 0 0 8px;
+  background: linear-gradient(90deg, #4fd6c6, #5aa8ff);
+  transition: width 0.45s ease;
+}
+.capacity-reserved {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  display: block;
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(255, 197, 116, 0.55) 0 6px,
+    rgba(255, 197, 116, 0.2) 6px 12px
+  );
+  transition: all 0.45s ease;
+}
+.capacity-legend {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.capacity-legend .dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 5px;
+  border-radius: 50%;
+  vertical-align: 1px;
+}
+.capacity-legend .dot.used {
+  background: #57cfc0;
+}
+.capacity-legend .dot.reserved {
+  background: #ffc574;
+}
+.capacity-legend .dot.free {
+  background: rgba(139, 199, 194, 0.3);
+}
+.capacity-limits {
+  margin-left: auto;
+  color: var(--muted-2);
+}
+
+/* Transfer queue */
+.transfer-panel {
+  margin-bottom: 14px;
+  padding: 14px 16px;
+  border: 1px solid rgba(85, 191, 183, 0.2);
+  border-radius: 14px;
+  background: rgba(18, 44, 60, 0.55);
+}
+.transfer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.transfer-head strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #cbe7f2;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.transfer-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.transfer-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.transfer-row .transfer-copy {
+  flex: 1;
+  min-width: 0;
+}
+.transfer-copy strong {
+  display: block;
+  overflow: hidden;
+  color: #e2f4ff;
+  font-size: 12px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.transfer-copy > span {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.transfer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.transfer-row.failed .progress-track span {
+  background: linear-gradient(90deg, #ff9a6b, #ff7382);
+}
+.transfer-row.cancelled .progress-track span {
+  background: linear-gradient(90deg, #9aa8b8, #7b8b9c);
+}
+.transfer-row.done .progress-track span {
+  background: linear-gradient(90deg, #57e2bd, #43d6dc);
+}
+.transfer-done {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  color: #57e2bd;
+  border-radius: 50%;
+  background: rgba(87, 226, 189, 0.12);
+}
+.download-panel {
+  border-color: rgba(103, 173, 255, 0.24);
+  background: rgba(24, 56, 92, 0.32);
+}
+.hint-text {
+  max-width: 46ch;
+  margin: 10px auto 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+@media (max-width: 720px) {
+  .capacity-head {
+    flex-direction: column;
+  }
+  .capacity-limits {
+    margin-left: 0;
+    width: 100%;
+  }
+}
