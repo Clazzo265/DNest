@@ -167,6 +167,9 @@ test('an invite link is public, vault-scoped and name-only', async () => {
   assert.equal(invite.status, 201);
 
   // The path must carry the workspace id, or the join page cannot resolve it.
+  // There is no DATANEST_ORIGIN in this suite, so the URL stays relative; the
+  // origin is still reported as null rather than guessed.
+  assert.equal(typeof invite.data.url, 'string');
   const match = /^\/join\/([^/]+)\/([^/]+)$/.exec(invite.data.path);
   assert.ok(match, 'invite path must be /join/<workspaceId>/<token>');
   assert.equal(match![1], workspaceId);
@@ -443,4 +446,106 @@ test('each vault keeps its own quota and content', async () => {
   const secondQuota = await owner.call('GET', '/api/vault?ws=' + secondId);
   assert.equal(personalQuota.data.quota.usedBytes, 7);
   assert.equal(secondQuota.data.quota.usedBytes, 6);
+});
+
+test('links use the declared public origin, so they are shareable', async () => {
+  // A dedicated server with DATANEST_ORIGIN set, mirroring a deployment behind
+  // a TLS-terminating proxy: the process sees plain HTTP and an internal host,
+  // so only the declared origin produces a link someone else can open.
+  const originPort = PORT + 1;
+  const originData = await mkdtemp(join(tmpdir(), 'datanest-origin-'));
+  const proc = spawn(
+    process.execPath,
+    ['--import', 'tsx', '--import', './server/register.ts', 'server/index.ts'],
+    {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        PORT: String(originPort),
+        DATANEST_DATA_DIR: originData,
+        DATANEST_ORIGIN: 'https://vault.example.com',
+        DATANEST_TRUST_PROXY: '1',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,
+    }
+  );
+
+  try {
+    const base = 'http://127.0.0.1:' + originPort;
+    const deadline = Date.now() + 30_000;
+    for (;;) {
+      try {
+        if ((await fetch(base + '/healthz')).ok) break;
+      } catch {
+        /* not up yet */
+      }
+      if (Date.now() > deadline) throw new Error('origin server did not start');
+      await new Promise(resolve => setTimeout(resolve, 150));
+    }
+
+    // The client learns the canonical origin from here.
+    const config = await (await fetch(base + '/api/config')).json();
+    assert.equal(config.origin, 'https://vault.example.com');
+    assert.equal(config.secure, true);
+
+    // an HTTPS public origin means the deployment is TLS-fronted: HSTS and a
+    // Secure session cookie are appropriate.
+    const health = await fetch(base + '/healthz');
+    assert.ok(health.headers.get('strict-transport-security'));
+
+    // Sign up over plain HTTP: the Secure cookie is not replayed by real
+    // browsers here, so drive the session explicitly.
+    const signup = await fetch(base + '/api/auth/signup', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        email: 'origin@example.com',
+        password: 'a long enough password',
+        name: 'Origin',
+      }),
+    });
+    assert.equal(signup.status, 201);
+    const cookie = (signup.headers.getSetCookie?.() ?? [])
+      .map(entry => entry.split(';')[0])
+      .join('; ');
+    assert.ok(cookie, 'signup must set a session cookie');
+
+    const created = await (
+      await fetch(base + '/api/workspaces', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie },
+        body: JSON.stringify({ name: 'Domain vault' }),
+      })
+    ).json();
+    const workspaceId = created.workspace.id;
+
+    const invite = await (
+      await fetch(base + '/api/workspace/invites?ws=' + workspaceId, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie },
+        body: JSON.stringify({ role: 'editor' }),
+      })
+    ).json();
+
+    assert.ok(
+      invite.url.startsWith('https://vault.example.com/join/' + workspaceId + '/'),
+      'invite URL must use the declared origin, got: ' + invite.url
+    );
+    assert.ok(!invite.url.includes('localhost'));
+    assert.ok(!invite.url.includes('127.0.0.1'));
+
+    // And the link still resolves to the right vault.
+    const preview = await (
+      await fetch(base + '/api/invites/' + workspaceId + '/' + invite.token)
+    ).json();
+    assert.equal(preview.workspaceName, 'Domain vault');
+  } finally {
+    try {
+      if (proc.pid) process.kill(-proc.pid, 'SIGKILL');
+    } catch {
+      proc.kill('SIGKILL');
+    }
+    await rm(originData, { recursive: true, force: true });
+  }
 });

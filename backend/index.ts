@@ -71,6 +71,8 @@ type RequestContext = {
    * rather than to the account that happens to be signed in.
    */
   workspace?: { id: string; role: Role };
+  /** Canonical public base URL, when the operator declared one. */
+  publicOrigin?: string;
 };
 
 
@@ -1088,6 +1090,11 @@ async function createWorkspaceInvite(ctx: RequestContext) {
       // origin it is actually served from. It must match what the join page
       // parses: /join/<workspaceId>/<token>.
       path: '/join/' + workspaceId(ctx) + '/' + token,
+      // Absolute URL built from the operator's declared origin, because a
+      // WhatsApp message containing a bare path is not clickable.
+      url: ctx.publicOrigin
+        ? ctx.publicOrigin + '/join/' + workspaceId(ctx) + '/' + token
+        : '/join/' + workspaceId(ctx) + '/' + token,
     },
     201
   );

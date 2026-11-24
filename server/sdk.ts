@@ -14,6 +14,8 @@ export type Ctx = {
   params: Record<string, string>;
   query: Record<string, string>;
   user?: { userId: string; email?: string; name?: string };
+  /** Canonical public base URL (no trailing slash) when the operator set one. */
+  publicOrigin?: string;
   /** Active shared vault and the caller's role in it. */
   workspace?: { id: string; role: 'owner' | 'editor' | 'viewer' };
   headers: Record<string, string>;

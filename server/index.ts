@@ -98,6 +98,16 @@ function log(event: string, detail: Record<string, unknown> = {}): void {
   );
 }
 
+/**
+ * Canonical public base URL, when the operator sets one.
+ *
+ * Behind a reverse proxy that terminates TLS - the normal way to deploy this -
+ * the process sees plain HTTP and `Host` may be an internal name, so a link
+ * built from the request is unusable in WhatsApp. DATANEST_ORIGIN is the one
+ * piece of information the operator knows and the process cannot infer.
+ */
+const PUBLIC_ORIGIN = (process.env.DATANEST_ORIGIN || '').replace(/\/+$/, '');
+
 function isSecure(headers: Record<string, string>): boolean {
   const origin = process.env.DATANEST_ORIGIN || '';
   if (origin.startsWith('https://')) return true;
@@ -106,6 +116,11 @@ function isSecure(headers: Record<string, string>): boolean {
     if (proto) return proto.split(',')[0].trim() === 'https';
   }
   return false;
+}
+
+/** Whether the public origin is HTTPS, which implies a real certificate. */
+function servingTls(): boolean {
+  return PUBLIC_ORIGIN.startsWith('https://') || isSecure({});
 }
 
 async function readBody(
@@ -440,6 +455,7 @@ async function handleApi(
     user: user
       ? { userId: user.userId, email: user.email, name: user.name }
       : undefined,
+    publicOrigin: PUBLIC_ORIGIN || undefined,
     workspace: undefined,
     headers,
     method,
@@ -634,6 +650,14 @@ const server = createServer(async (request, response) => {
   for (const [key, value] of Object.entries(securityHeaders)) {
     response.setHeader(key, value);
   }
+  // Only meaningful over HTTPS; sending it on plain HTTP would lock a
+  // self-hosted deployment out of its own hostname.
+  if (servingTls()) {
+    response.setHeader(
+      'strict-transport-security',
+      'max-age=15552000; includeSubDomains'
+    );
+  }
 
   const method = (request.method || 'GET').toUpperCase();
   const url = new URL(request.url || '/', 'http://localhost');
@@ -643,6 +667,20 @@ const server = createServer(async (request, response) => {
       response.statusCode = 200;
       response.setHeader('content-type', 'application/json');
       response.end(JSON.stringify({ ok: true, uptime: process.uptime() }));
+      return;
+    }
+
+    if (url.pathname === '/api/config') {
+      response.statusCode = 200;
+      response.setHeader('content-type', 'application/json');
+      response.end(
+        JSON.stringify({
+          // Null means "use whatever origin the browser used", which is correct
+          // for direct access and for any proxy that preserves Host.
+          origin: PUBLIC_ORIGIN || null,
+          secure: servingTls(),
+        })
+      );
       return;
     }
 

@@ -55,7 +55,13 @@ type InviteApi = {
   invite(input: {
     role: 'editor' | 'viewer';
     email?: string;
-  }): Promise<{ token: string; code: string; path: string; expiresAt: number }>;
+  }): Promise<{
+    token: string;
+    code: string;
+    path: string;
+    url: string;
+    expiresAt: number;
+  }>;
   revokeInvite(code: string): Promise<void>;
   setRole(userId: string, role: Role): Promise<void>;
   removeMember(userId: string): Promise<void>;
@@ -82,17 +88,60 @@ export function isUnreachableLink(url: string): boolean {
 }
 
 /**
+ * Origin the invite link should point at.
+ *
+ * `window.location.origin` is correct when the browser reached the app directly.
+ * Behind a proxy on a different external host it is not, so the server publishes
+ * the intended origin at /api/config and that wins when present. Falls back to
+ * window.location when the config is absent or still loading.
+ */
+let resolvedOrigin: string | null = null;
+
+async function publicOrigin(): Promise<string> {
+  if (resolvedOrigin) return resolvedOrigin;
+  const fallback =
+    typeof window !== 'undefined' && window.location?.origin
+      ? window.location.origin
+      : '';
+  try {
+    const response = await fetch('/api/config');
+    if (response.ok) {
+      const config = (await response.json()) as { origin?: string | null };
+      resolvedOrigin = config.origin || fallback;
+      return resolvedOrigin;
+    }
+  } catch {
+    /* ignore; use the browser's own origin */
+  }
+  resolvedOrigin = fallback;
+  return fallback;
+}
+
+/** Absolute link for an invite, preferring the configured public origin. */
+export async function absoluteInviteUrl(
+  workspaceId: string,
+  token: string
+): Promise<string> {
+  return inviteUrl(workspaceId, token, await publicOrigin());
+}
+
+/**
  * Build the absolute invite URL from wherever the app is actually served.
  * The workspace id is part of the path: an invite resolves against one vault, and
  * the join page needs to know which before the visitor has an account.
  */
-export function inviteUrl(workspaceId: string, token: string): string {
-  const origin =
-    typeof window !== 'undefined' && window.location?.origin
+export function inviteUrl(
+  workspaceId: string,
+  token: string,
+  origin?: string
+): string {
+  const base =
+    origin ??
+    (typeof window !== 'undefined' && window.location?.origin
       ? window.location.origin
-      : '';
+      : '');
   return (
-    origin +
+    base +
     '/join/' +
     encodeURIComponent(workspaceId) +
     '/' +
@@ -194,7 +243,9 @@ export function MembersPanel({
         role,
         email: email.trim() || undefined,
       });
-      const url = inviteUrl(workspaceId, invite.token);
+      // Prefer the server-built absolute URL: it already honours the operator's
+      // declared origin, so the link works when the app is behind a proxy.
+      const url = invite.url || (await absoluteInviteUrl(workspaceId, invite.token));
       setFreshInvite({ token: invite.token, url, code: invite.code });
       setEmail('');
       await load();
