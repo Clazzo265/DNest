@@ -8,7 +8,7 @@
  */
 import '../.devtesting/dom.mjs';
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -23,7 +23,6 @@ let dataDir = '';
 
 before(async () => {
   await import('../.devtesting/node-dom.mjs');
-  execFileSync(process.execPath, ['.devtesting/link.mjs'], { cwd: process.cwd() });
   dataDir = await mkdtemp(join(tmpdir(), 'datanest-scale-'));
   server = spawn(process.execPath, ['--import', 'tsx', '.devtesting/server.ts'], {
     cwd: process.cwd(),

@@ -9,10 +9,12 @@
     "build": "vite build",
     "start": "node --import tsx --import ./server/register.ts server/index.ts",
     "serve": "npm run build && npm start",
+    "prepare:test": "node .devtesting/link.mjs",
+    "pretest": "node .devtesting/link.mjs",
+    "pretypecheck": "node .devtesting/link.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc -p .devtesting/tsconfig.backend.json && tsc --noEmit -p tsconfig.server.json",
     "test": "tsx --test tests/capacity.test.ts tests/api.test.ts tests/transfer.test.ts tests/download.test.ts tests/scale.test.ts tests/server.test.ts",
-    "harness": "bash .devtesting/serve.sh",
-    "dev:server": "node --import tsx --import ./server/register.ts server/index.ts"
+    "harness": "bash .devtesting/serve.sh"
   },
   "dependencies": {
     "lucide-react": "^0.469.0",

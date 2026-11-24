@@ -6,7 +6,7 @@
  * Run: npx tsx --test tests/transfer.test.ts
  */
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -29,8 +29,6 @@ let dataDir = '';
 before(async () => {
   // Browser globals the engine uses, shimmed for Node.
   await import('../.devtesting/node-dom.mjs');
-  // The platform packages are injected at deploy time; recreate the stand-ins.
-  execFileSync(process.execPath, ['.devtesting/link.mjs'], { cwd: process.cwd() });
   dataDir = await mkdtemp(join(tmpdir(), 'datanest-transfer-'));
   server = spawn(process.execPath, ['--import', 'tsx', '.devtesting/server.ts'], {
     cwd: process.cwd(),

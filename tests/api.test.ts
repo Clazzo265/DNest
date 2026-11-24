@@ -9,7 +9,7 @@
  * Run: npx tsx --test tests/api.test.ts
  */
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -61,8 +61,6 @@ function makeBytes(size: number, seed = 7): Uint8Array {
 }
 
 before(async () => {
-  // The platform packages are injected at deploy time; recreate the stand-ins.
-  execFileSync(process.execPath, ['.devtesting/link.mjs'], { cwd: process.cwd() });
   dataDir = await mkdtemp(join(tmpdir(), 'datanest-test-'));
   server = spawn(
     process.execPath,
