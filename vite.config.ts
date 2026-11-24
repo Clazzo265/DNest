@@ -18,7 +18,15 @@ const selfHosted = !harness;
 
 export default defineConfig({
   plugins: [react()],
-  base: './',
+  /**
+   * Relative asset URLs keep the build working when the app is deployed under a
+   * path or served through a proxy that rewrites the host. The server resolves
+   * these against the build root at any route depth (see serveStatic), so the
+   * invite page works at /join/<ws>/<token>.
+   *
+   * Override only if the app must be pinned to an absolute prefix.
+   */
+  base: process.env.DATANEST_BASE || './',
   resolve: harness
     ? {
         alias: {

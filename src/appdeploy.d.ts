@@ -80,7 +80,7 @@ declare module '@appdeploy/client' {
     invite(input: {
       role: 'editor' | 'viewer';
       email?: string;
-    }): Promise<{ token: string; code: string; path: string; expiresAt: number }>;
+    }): Promise<{ token: string; code: string; path: string; url: string; expiresAt: number }>;
     revokeInvite(code: string): Promise<void>;
     setRole(
       userId: string,

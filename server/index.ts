@@ -98,6 +98,16 @@ function log(event: string, detail: Record<string, unknown> = {}): void {
   );
 }
 
+/**
+ * Canonical public base URL, when the operator sets one.
+ *
+ * Behind a reverse proxy that terminates TLS - the normal way to deploy this -
+ * the process sees plain HTTP and `Host` may be an internal name, so a link
+ * built from the request is unusable in WhatsApp. DATANEST_ORIGIN is the one
+ * piece of information the operator knows and the process cannot infer.
+ */
+const PUBLIC_ORIGIN = (process.env.DATANEST_ORIGIN || '').replace(/\/+$/, '');
+
 function isSecure(headers: Record<string, string>): boolean {
   const origin = process.env.DATANEST_ORIGIN || '';
   if (origin.startsWith('https://')) return true;
@@ -106,6 +116,11 @@ function isSecure(headers: Record<string, string>): boolean {
     if (proto) return proto.split(',')[0].trim() === 'https';
   }
   return false;
+}
+
+/** Whether the public origin is HTTPS, which implies a real certificate. */
+function servingTls(): boolean {
+  return PUBLIC_ORIGIN.startsWith('https://') || isSecure({});
 }
 
 async function readBody(
@@ -440,6 +455,7 @@ async function handleApi(
     user: user
       ? { userId: user.userId, email: user.email, name: user.name }
       : undefined,
+    publicOrigin: PUBLIC_ORIGIN || undefined,
     workspace: undefined,
     headers,
     method,
@@ -576,30 +592,78 @@ function safeJoin(root: string, requestPath: string): string | null {
   return target;
 }
 
+/**
+ * Serve a static file, or the SPA shell.
+ *
+ * Two rules here were learned the hard way:
+ *
+ *  1. Assets resolve against the *build root*, not the request path. The build
+ *     uses relative URLs (`./assets/index-abc.js` in index.html, `base: './'`),
+ *     so a deep link such as /join/<ws>/<token> asks the browser for
+ *     /join/<ws>/assets/index-abc.js. Resolving "relative to the request" served
+ *     HTML with a JavaScript content type and `nosniff`, so the module refused to
+ *     execute and the page rendered blank - the invite link was dead on arrival.
+ *     Falling back to the asset's basename keeps one build valid at any depth.
+ *
+ *  2. The shell fallback is HTML only. Handing HTML to a request for a .js or
+ *     .css file produces a content-type mismatch the browser silently rejects,
+ *     which looks identical to "the site is broken" with nothing in the logs.
+ */
 async function serveStatic(url: URL): Promise<Result & { file?: string } | null> {
   const root = STATIC_DIR;
   const pathname = url.pathname === '/' ? '/index.html' : url.pathname;
   const candidate = safeJoin(root, pathname);
-  if (!candidate) return null;
 
-  const info = await stat(candidate).catch(() => null);
-  if (info?.isFile()) {
-    const body = await readFile(candidate);
+  const existing = candidate ? await stat(candidate).catch(() => null) : null;
+  const direct = existing?.isFile() ? candidate : null;
+
+  /**
+   * Relative asset references from a nested route.
+   *
+   * A deep link makes the browser resolve `./assets/index-abc.js` against the
+   * route, producing /join/<ws>/<token>/assets/index-abc.js. Rather than guess a
+   * prefix, try progressively shorter suffixes of the path until one exists:
+   * longest first, so a genuine nested file still wins over a shallower match.
+   */
+  let resolved = direct;
+  if (!resolved) {
+    const segments = pathname.split('/').filter(Boolean);
+    const looksLikeFile =
+      segments.length > 0 && /\.[a-z0-9]{1,8}$/i.test(segments[segments.length - 1]);
+    if (looksLikeFile) {
+      for (let start = 1; start < segments.length && !resolved; start += 1) {
+        const suffix = '/' + segments.slice(start).join('/');
+        const alternative = safeJoin(root, suffix);
+        if (!alternative) continue;
+        const info = await stat(alternative).catch(() => null);
+        if (info?.isFile()) resolved = alternative;
+      }
+    }
+  }
+
+  if (resolved) {
+    // An explicit response for a real file: never HTML for a script or style.
+    const body = await readFile(resolved);
     return {
       statusCode: 200,
       body: body.toString('binary'),
-      file: candidate,
+      file: resolved,
       headers: {
-        'content-type': MIME[extname(candidate).toLowerCase()] || 'application/octet-stream',
-        // Hashed asset names are immutable; HTML must always revalidate.
-        'cache-control': /\/assets\//.test(candidate)
+        'content-type':
+          MIME[extname(resolved).toLowerCase()] || 'application/octet-stream',
+        // Hashed asset names are immutable; everything else must revalidate.
+        'cache-control': /\/assets\//.test(resolved)
           ? 'public, max-age=31536000, immutable'
           : 'no-cache',
       },
     };
   }
 
-  // Single-page app: unknown paths render the app shell.
+  // A missing file must 404. Returning the shell here is what makes a typo in an
+  // asset path look like a working page that does nothing.
+  if (/\.[a-z0-9]{1,8}$/i.test(pathname)) return null;
+
+  // Single-page app route: render the shell.
   const fallback = join(root, 'index.html');
   const fallbackInfo = await stat(fallback).catch(() => null);
   if (!fallbackInfo?.isFile()) return null;
@@ -634,6 +698,14 @@ const server = createServer(async (request, response) => {
   for (const [key, value] of Object.entries(securityHeaders)) {
     response.setHeader(key, value);
   }
+  // Only meaningful over HTTPS; sending it on plain HTTP would lock a
+  // self-hosted deployment out of its own hostname.
+  if (servingTls()) {
+    response.setHeader(
+      'strict-transport-security',
+      'max-age=15552000; includeSubDomains'
+    );
+  }
 
   const method = (request.method || 'GET').toUpperCase();
   const url = new URL(request.url || '/', 'http://localhost');
@@ -643,6 +715,20 @@ const server = createServer(async (request, response) => {
       response.statusCode = 200;
       response.setHeader('content-type', 'application/json');
       response.end(JSON.stringify({ ok: true, uptime: process.uptime() }));
+      return;
+    }
+
+    if (url.pathname === '/api/config') {
+      response.statusCode = 200;
+      response.setHeader('content-type', 'application/json');
+      response.end(
+        JSON.stringify({
+          // Null means "use whatever origin the browser used", which is correct
+          // for direct access and for any proxy that preserves Host.
+          origin: PUBLIC_ORIGIN || null,
+          secure: servingTls(),
+        })
+      );
       return;
     }
 

@@ -3,8 +3,8 @@ import JSZip from 'jszip';
 import { api, auth, workspaces } from '@appdeploy/client';
 import {
   MembersPanel,
+  absoluteInviteUrl,
   inviteMessage,
-  inviteUrl,
   isUnreachableLink,
   whatsappShareUrl,
 } from './Members';
@@ -266,7 +266,8 @@ function App() {
       const invite = await workspaces.invite({ role: 'editor' });
       const current = vaults.find(vault => vault.id === activeVault);
       setQuickInvite({
-        url: inviteUrl(activeVault, invite.token),
+        url:
+          invite.url || (await absoluteInviteUrl(activeVault, invite.token)),
         vaultName: current?.name || 'my DataNest vault',
       });
       await refreshWorkspaces();

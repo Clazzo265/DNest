@@ -144,6 +144,20 @@ workspace cookie (`datanest_ws`) is used, then the personal workspace. A `?ws=`
 you cannot reach is a hard `403` rather than a silent fallback to a different
 vault.
 
+### Why deep links are served the way they are
+
+The build references its assets relatively (`./assets/index-abc.js`). When a
+browser opens `/join/<workspace>/<token>` it resolves that reference against the
+route and asks for `/join/<workspace>/<token>/assets/index-abc.js`. The server
+therefore falls back through progressively shorter suffixes of a request path
+until it finds a real file, and **never** answers a script or style request with
+the HTML shell — Chrome and Firefox reject a module served as `text/html` under
+`X-Content-Type-Options: nosniff`, which renders a blank page with no error.
+A missing asset now returns `404` rather than a convincing-looking empty app.
+
+If SPA loading ever fails, the shell renders an explicit message instead of a
+blank screen, including when a required script never loads.
+
 ### Usage notes
 
 - A link pointing at `localhost` cannot be opened by anyone else. The UI detects
@@ -175,7 +189,7 @@ before `:index`, or `read` would be parsed as a part number.
 ```bash
 npm install
 npm run typecheck   # frontend + backend + server types
-npm test            # 52 tests
+npm test            # 59 tests
 DATANEST_SCALE_MB=256 npm test   # bigger scale run
 ```
 
@@ -188,6 +202,7 @@ DATANEST_SCALE_MB=256 npm test   # bigger scale run
 | `tests/scale.test.ts` | 64 MB upload, bounded in-flight window |
 | `tests/server.test.ts` | sessions, security headers, request limits, restart durability |
 | `tests/members.test.ts` | shared vaults, role enforcement, invite links, single use, expiry, token hashing |
+| `tests/static.test.ts` | deep-link asset resolution, no HTML for scripts, traversal, shell fallback |
 
 The AppDeploy SDK is injected by the platform and is not published to npm, so
 `.devtesting/` contains dependency-free stand-ins (plus a Node HTTP harness) used
@@ -234,8 +249,61 @@ DATANEST_DATA_DIR=/var/lib/datanest PORT=8080 npm start
 | `PORT` | `8080` | Listen port (binds `0.0.0.0`) |
 | `DATANEST_DATA_DIR` | `./data` | Root for tables + stored parts. **Back this up.** |
 | `DATANEST_STATIC_DIR` | `./dist` | Built frontend |
-| `DATANEST_ORIGIN` | — | Public origin; set to an `https://` URL to mark cookies `Secure` |
+| `DATANEST_ORIGIN` | — | Canonical public origin, e.g. `https://vault.example.com`. Also what invite links are built from, and an `https://` value marks cookies `Secure` |
 | `DATANEST_TRUST_PROXY` | — | Set `1` behind a TLS-terminating proxy so `X-Forwarded-Proto` is honoured |
+
+### Putting it on a real address
+
+Invite links must point somewhere the recipient's phone can reach. Until the app
+is served on a public `https://` address, any invite link is useless to anybody
+else — the UI detects a `localhost` link and warns instead of letting you send a
+dead one.
+
+The address needs **two** things: DNS pointing at a machine that runs DataNest,
+and a TLS certificate. A domain by itself is only the name.
+
+```bash
+# On the server, with DataNest listening on 8080
+export DATANEST_ORIGIN=https://vault.example.com
+export DATANEST_TRUST_PROXY=1
+DATANEST_DATA_DIR=/var/lib/datanest npm start
+```
+
+Terminate TLS in front of it with anything that forwards `Host` and
+`X-Forwarded-Proto` — Caddy is the shortest path because it obtains certificates
+automatically:
+
+```
+vault.example.com {
+  reverse_proxy 127.0.0.1:8080
+}
+```
+
+With `DATANEST_ORIGIN` set, `/api/config` publishes the canonical origin, invite
+links are absolute `https://` URLs, the session cookie is marked `Secure`, and
+`Strict-Transport-Security` is sent. Without it, links fall back to whatever host
+the browser used, which is correct for direct access and wrong behind a proxy.
+
+Check it took effect:
+
+```bash
+curl -s https://vault.example.com/api/config
+# {"origin":"https://vault.example.com","secure":true}
+```
+
+Then create an invite and confirm the link in the UI starts with
+`https://vault.example.com/join/...` rather than `localhost`.
+
+**A note on free-domain services.** Sites offering free lifetime domains
+(ifreedomain.com and lookalikes) ask you to register a domain in your own name
+and hand over contact details. They cannot register a `.com` profitably — the
+wholesale cost is roughly $10/year — and the ones we looked at carry a pattern of
+support complaints and users reporting nothing was ever provisioned. A domain is
+also the least of the requirements here: it gives you a name, not a machine, not
+storage, and not a certificate. The cheapest reliable route is a normal
+registrar (roughly $10-12/year) plus a small VPS (a few dollars a month), or a
+hosted platform. Free subdomains such as DuckDNS or a Cloudflare `*.workers.dev`
+name are fine when you only need something reachable.
 
 ### Platform blueprints in this repo
 

@@ -153,7 +153,7 @@ export const workspaces = {
   async invite(input: {
     role: 'editor' | 'viewer';
     email?: string;
-  }): Promise<{ token: string; code: string; path: string; expiresAt: number }> {
+  }): Promise<{ token: string; code: string; path: string; url: string; expiresAt: number }> {
     const response = await api.post('/api/workspace/invites', input);
     return response.data;
   },
