@@ -218,7 +218,22 @@ export function router(routes: Record<string, ((ctx: Ctx) => any)[]>) {
       }
       if (!matched) continue;
 
-      const ctx: Ctx = { body, params, query, user: user as any };
+      // Mirror the production resolver: every request acts on a workspace.
+      const ctx: Ctx & { workspace?: { id: string; role: string } } = {
+        body,
+        params,
+        query,
+        user: user as any,
+        workspace: user
+          ? {
+              id:
+                (query as any).ws ||
+                'personal-' +
+                  String((user as any).userId).replace(/[^a-zA-Z0-9]/g, ''),
+              role: 'owner',
+            }
+          : undefined,
+      };
       for (const middleware of chain) {
         const result = await middleware(ctx);
         if (result) return result;

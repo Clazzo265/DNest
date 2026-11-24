@@ -43,6 +43,55 @@ export const api = {
   put: (url: string, body?: unknown) =>
     send({ url, init: { method: 'PUT', body: JSON.stringify(body ?? {}) } }),
   delete: (url: string) => send({ url, init: { method: 'DELETE' } }),
+  patch: (url: string, body?: unknown) =>
+    send({ url, init: { method: 'PATCH', body: JSON.stringify(body ?? {}) } }),
+};
+
+/** Dev harness: only what the tests use. */
+export const workspaces = {
+  async list() {
+    const response = await api.get('/api/workspaces');
+    return response.data;
+  },
+  async create(name: string) {
+    const response = await api.post('/api/workspaces', { name });
+    return (response.data as any).workspace;
+  },
+  async rename(name: string) {
+    await api.patch('/api/workspace', { name });
+  },
+  async members(ws?: string) {
+    const response = await api.get(
+      ws ? '/api/workspace?ws=' + encodeURIComponent(ws) : '/api/workspace'
+    );
+    return response.data;
+  },
+  async invite(input: any) {
+    const response = await api.post('/api/workspace/invites', input);
+    return response.data;
+  },
+  async revokeInvite(code: string) {
+    await api.delete('/api/workspace/invites/' + encodeURIComponent(code));
+  },
+  async setRole(userId: string, role: string) {
+    await api.patch('/api/workspace/members/' + encodeURIComponent(userId), { role });
+  },
+  async removeMember(userId: string) {
+    await api.delete('/api/workspace/members/' + encodeURIComponent(userId));
+  },
+  async invitePreview(workspaceId: string, token: string) {
+    const response = await api.get(
+      '/api/invites/' + encodeURIComponent(workspaceId) + '/' + encodeURIComponent(token)
+    );
+    return response.data;
+  },
+  async acceptInvite(workspaceId: string, token: string) {
+    const response = await api.post(
+      '/api/invites/' + encodeURIComponent(workspaceId) + '/' + encodeURIComponent(token),
+      {}
+    );
+    return response.data;
+  },
 };
 
 export const auth = {

@@ -85,6 +85,71 @@ The in-flight window is **constant** as the file grows — that is what makes th
 1 TiB case survivable. Every part is sent exactly once, and spot-checked parts
 are byte-identical to the source.
 
+## Shared vaults and WhatsApp invites
+
+A vault belongs to a **workspace**, not to an account. Every account gets a
+private personal workspace automatically, so single-user behaviour is unchanged
+and no data migration was needed. Additional workspaces are shared: the creator
+is the owner and can invite others.
+
+Roles are ordered `viewer` < `editor` < `owner` and enforced on the server:
+
+| Role | Read | Write | Invite / change roles / remove members |
+| --- | --- | --- | --- |
+| viewer | yes | no | no |
+| editor | yes | yes | no |
+| owner | yes | yes | yes |
+
+The last owner of a workspace cannot be demoted, removed, or leave — that would
+strand the vault with nobody able to administer it.
+
+### Inviting someone over WhatsApp
+
+1. Open **Members** (or press **Invite**) in the sidebar.
+2. Pick the role the person should get and press **Create link**.
+3. Press **Share on WhatsApp**. This opens WhatsApp — mobile app or WhatsApp Web —
+   with the message and link prefilled; you choose the recipient or group and send.
+
+The link looks like `https://<your-host>/join/<workspaceId>/<token>` and is
+genuinely usable by someone with no account: the landing page shows the vault
+name and the role, then lets them create an account or sign in and join in one
+step. There is no email server involved, so nothing depends on SMTP working.
+
+Invite properties:
+
+- **192-bit random token**, stored only as a SHA-256 hash, shown to the inviter once.
+- **Single use** — joining consumes it; the second attempt reports "already used".
+- **Expires after 7 days.**
+- **Requires being signed in to accept**, so a forwarded link cannot silently
+  enrol somebody who never agreed.
+- The public preview exposes only the vault name, the offered role and the expiry
+  date. No members, no items, no usage.
+
+### Endpoints
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/workspaces` | Workspaces you can reach, plus your role |
+| POST | `/api/workspaces` | Create a shared workspace |
+| GET | `/api/workspace` | Members and pending invites |
+| PATCH | `/api/workspace` | Rename the active workspace |
+| POST | `/api/workspace/invites` | Create an invite (owner only) |
+| DELETE | `/api/workspace/invites/:code` | Revoke a pending invite |
+| PATCH/DELETE | `/api/workspace/members/:userId` | Change a role / remove a member |
+| GET | `/api/invites/:ws/:token` | Public preview of an invite |
+| POST | `/api/invites/:ws/:token` | Accept an invite (requires a session) |
+
+Every vault route accepts `?ws=<workspaceId>`; without it the previously selected
+workspace cookie (`datanest_ws`) is used, then the personal workspace. A `?ws=`
+you cannot reach is a hard `403` rather than a silent fallback to a different
+vault.
+
+### Usage notes
+
+- A link pointing at `localhost` cannot be opened by anyone else. The UI detects
+  this and warns instead of letting you send a dead link — deploy first, then
+  invite.
+
 ## API
 
 | Method | Path | Purpose |
@@ -110,7 +175,7 @@ before `:index`, or `read` would be parsed as a part number.
 ```bash
 npm install
 npm run typecheck   # frontend + backend + server types
-npm test            # 42 tests
+npm test            # 52 tests
 DATANEST_SCALE_MB=256 npm test   # bigger scale run
 ```
 
@@ -122,6 +187,7 @@ DATANEST_SCALE_MB=256 npm test   # bigger scale run
 | `tests/download.test.ts` | streaming + fallback byte-identical output |
 | `tests/scale.test.ts` | 64 MB upload, bounded in-flight window |
 | `tests/server.test.ts` | sessions, security headers, request limits, restart durability |
+| `tests/members.test.ts` | shared vaults, role enforcement, invite links, single use, expiry, token hashing |
 
 The AppDeploy SDK is injected by the platform and is not published to npm, so
 `.devtesting/` contains dependency-free stand-ins (plus a Node HTTP harness) used

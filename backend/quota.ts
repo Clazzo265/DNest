@@ -42,8 +42,8 @@ export const USAGE_TABLE_PREFIX = 'vault_usage_';
 
 const MAX_LOCK_ATTEMPTS = 5;
 
-export function usageTableFor(userKey: string): string {
-  return USAGE_TABLE_PREFIX + userKey;
+export function usageTableFor(workspaceId: string): string {
+  return USAGE_TABLE_PREFIX + workspaceId;
 }
 
 function emptyUsage(): Usage {
