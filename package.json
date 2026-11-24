@@ -14,7 +14,8 @@
     "pretypecheck": "node .devtesting/link.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc -p .devtesting/tsconfig.backend.json && tsc --noEmit -p tsconfig.server.json",
     "test": "tsx --test tests/capacity.test.ts tests/api.test.ts tests/transfer.test.ts tests/download.test.ts tests/scale.test.ts tests/server.test.ts tests/members.test.ts tests/static.test.ts",
-    "harness": "bash .devtesting/serve.sh"
+    "harness": "bash .devtesting/serve.sh",
+    "smoke": "bash scripts/smoke.sh"
   },
   "dependencies": {
     "lucide-react": "^0.469.0",
