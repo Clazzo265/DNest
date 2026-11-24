@@ -1,8 +1,10 @@
 name: CI
 
-# Every push and PR is verified: types, the 42-test suite (including a real
-# restart-durability test), a production build, and a smoke test that actually
-# boots the server and exercises signup + upload through it.
+# Every push and PR is verified: types, the full test suite (including a real
+# restart-durability test), a production build, and `scripts/smoke.sh` - which
+# boots the server and walks the invite journey end to end. The Docker job runs
+# the same script against the image that gets published, so what ships is what
+# was tested.
 on:
   push:
     branches: [main, 'arena/**']
@@ -52,25 +54,9 @@ jobs:
             sleep 1
           done
 
-          echo "health:"
-          curl -fsS http://127.0.0.1:8080/healthz
-
-          echo "shell:"
-          curl -fsS http://127.0.0.1:8080/ | grep -q '<div id="root">'
-
-          echo "anonymous access is refused:"
-          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/vault)" = "401"
-
-          echo "signup + quota:"
-          JAR="$RUNNER_TEMP/jar.txt"
-          curl -fsS -c "$JAR" -X POST http://127.0.0.1:8080/api/auth/signup \
-            -H 'content-type: application/json' \
-            -d '{"email":"smoke@example.com","password":"smoke test password"}' > /dev/null
-          QUOTA=$(curl -fsS -b "$JAR" http://127.0.0.1:8080/api/vault | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).quota.quotaBytes))")
-          test "$QUOTA" = "1099511627776"
-          echo "quota is 1 TiB ($QUOTA bytes)"
-
-          echo "SMOKE OK"
+          # Same script the Deploy workflow runs against the live host, so a
+          # green CI means the invite journey works, not just that it compiles.
+          bash scripts/smoke.sh http://127.0.0.1:8080
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -107,5 +93,9 @@ jobs:
           done
           curl -fsS http://127.0.0.1:8081/healthz
           curl -fsS http://127.0.0.1:8081/ | grep -q '<div id="root">'
+
+          # Exercise the real journey against the actual published artifact.
+          bash scripts/smoke.sh http://127.0.0.1:8081
+
           docker logs datanest-ci
           docker rm -f datanest-ci

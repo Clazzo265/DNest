@@ -220,6 +220,62 @@ build is unchanged and still expects the platform-injected packages.
 
 ## Deployment
 
+Three ways to run it, in order of how much you have to do:
+
+| Route | What you do | What you get |
+| --- | --- | --- |
+| Host with a disk | Approve a blueprint (Render/Fly) | Public `https://` URL, persistent vault |
+| Your own server | `docker run` + a reverse proxy | Public URL once DNS and TLS are set |
+| Just this machine | `npm start` | `localhost` only; invites are not shareable |
+
+GitHub builds, tests and publishes the container on every push to `main`. It
+cannot **host** the app: Pages serves static files only and serverless functions
+have no disk for the vault. So GitHub is the pipeline, and a host is the thing
+that actually serves traffic.
+
+### What runs automatically
+
+| Workflow | Trigger | Result |
+| --- | --- | --- |
+| `CI` | every push and PR | types, 59 tests, build, `scripts/smoke.sh` |
+| `Publish container image` | green `main` | `ghcr.io/<owner>/datanest:latest` |
+| `Deploy` | after a successful publish | triggers the host, then verifies it live |
+
+`scripts/smoke.sh` is the thing to look at if you want to know whether it
+works: it signs up, creates a vault, mints an invite, resolves that invite as a
+stranger, joins, reads the shared data, and confirms the link is single-use.
+CI runs it against a locally booted server **and** against the published image.
+The Deploy workflow runs the same assertions against the live URL, so a green
+deploy means the invite journey works for a real recipient — not just that the
+container started.
+
+### Turning on the Deploy workflow
+
+The workflow is deliberately honest: with no target configured it prints
+instructions and does not claim success. To make it deploy for real:
+
+1. Create the service from `render.yaml` (see below) and give it a disk.
+2. Copy its **Deploy Hook** into the repository secret `RENDER_DEPLOY_HOOK`.
+3. Add the service URL as `DATANEST_PUBLIC_URL`.
+
+From then on, every push to `main` publishes an image, triggers the host, and
+polls `/healthz` until the new build is live before reporting success.
+
+### Self-hosted with GitHub as the source
+
+GitHub hosts the image; a machine of yours runs it:
+
+```bash
+docker run -d --restart=always -p 80:8080 \
+  -v datanest-data:/data \
+  -e DATANEST_ORIGIN=https://your.domain \
+  -e DATANEST_TRUST_PROXY=1 \
+  ghcr.io/clazzo265/dnest:latest
+```
+
+The image is public, so no registry login is needed. Update by pulling and
+restarting; the vault lives in the named volume, not the container.
+
 DataNest is a self-contained Node service: it serves the built frontend, the API,
 and stores vault bytes on disk. One process, one volume.
 

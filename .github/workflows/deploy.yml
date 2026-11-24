@@ -1,0 +1,155 @@
+name: Deploy
+
+# Promotes the published image to a running host.
+#
+# GitHub Actions can build, test and publish a container, but it cannot *host* a
+# stateful Node process: Pages serves static files only and functions have no
+# persistent disk. So deployment is always two halves - a host plus this
+# pipeline telling it what to run. This workflow is the second half, and it is
+# deliberately honest about the first: with no target configured it prints the
+# exact steps rather than reporting a fake success.
+#
+# Configure one of these repository secrets to make it deploy for real:
+#
+#   RENDER_DEPLOY_HOOK   Render -> service -> Settings -> Deploy Hook
+#   DATANEST_PUBLIC_URL  e.g. https://datanest.onrender.com (enables verification)
+#
+# Either way, the image itself is already published to GHCR by the Publish
+# workflow, so any host can pull ghcr.io/<owner>/datanest:latest at any time.
+
+on:
+  workflow_run:
+    workflows: [Publish container image]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Promote to host
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Only after a successful image publish.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check deployment target
+        id: target
+        env:
+          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+          PUBLIC_URL: ${{ secrets.DATANEST_PUBLIC_URL }}
+        run: |
+          set -euo pipefail
+          if [ -n "${RENDER_DEPLOY_HOOK:-}" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "Deploy hook is configured; deploying to Render."
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "No deploy hook configured. Printing instructions instead."
+          fi
+          if [ -n "${PUBLIC_URL:-}" ]; then
+            echo "verify=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "verify=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Trigger deploy
+        if: steps.target.outputs.configured == 'true'
+        env:
+          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+        run: |
+          set -euo pipefail
+          # Render's hook is a pre-signed URL; a GET triggers a deploy.
+          response=$(curl -fsS -X GET "$RENDER_DEPLOY_HOOK")
+          echo "trigger response: $response"
+          if echo "$response" | grep -qi "error"; then
+            echo "::error::The host rejected the deploy request."
+            exit 1
+          fi
+          echo "Deploy accepted by the host."
+
+      - name: Wait for the new version to serve traffic
+        if: steps.target.outputs.verify == 'true'
+        env:
+          PUBLIC_URL: ${{ secrets.DATANEST_PUBLIC_URL }}
+        run: |
+          set -euo pipefail
+          url="${PUBLIC_URL%/}"
+          echo "Polling $url/healthz until the new build is live..."
+          # Render builds and swaps over; give it room but do not hang forever.
+          for i in $(seq 1 100); do
+            body=$(curl -fsS --max-time 10 "$url/healthz" 2>/dev/null || true)
+            if echo "$body" | grep -q '"ok":true'; then
+              echo "Health is good: $body"
+              break
+            fi
+            if [ "$i" = "100" ]; then
+              echo "::error::The deployment did not become healthy in time."
+              exit 1
+            fi
+            sleep 6
+          done
+
+          echo "Checking that the app shell is served:"
+          curl -fsS --max-time 15 "$url/" | grep -q '<div id="root">'
+
+          echo "Checking that invite links are built from the public origin:"
+          curl -fsS --max-time 15 "$url/api/config"
+
+          echo "Checking that anonymous access is still refused:"
+          test "$(curl -s -o /dev/null -w '%{http_code}' "$url/api/vault")" = "401"
+
+          echo "LIVE: $url"
+
+      - name: Record the outcome
+        run: |
+          set -euo pipefail
+          {
+            echo "## Deployment"
+            echo
+            if [ "${{ steps.target.outputs.configured }}" = "true" ]; then
+              echo "Deploy triggered on the configured host."
+            else
+              echo "**No host is configured**, so nothing was deployed."
+              echo
+              echo "GitHub Actions publishes a container but cannot host this app:"
+              echo "Pages serves static files only, and functions have no disk for"
+              echo "the vault. Pick a host once - it takes about two minutes:"
+              echo
+              echo "### Render (has a persistent disk, free HTTPS URL)"
+              echo "1. <https://render.com/deploy?repo=https://github.com/${{ github.repository }}>"
+              echo "2. Approve the blueprint in \`render.yaml\` (100 GB disk at \`/data\`)."
+              echo "3. Copy the service's **Deploy Hook** and add it as the"
+              echo "   \`RENDER_DEPLOY_HOOK\` repository secret."
+              echo "4. Add the service URL as \`DATANEST_PUBLIC_URL\`."
+              echo
+              echo "From then on this workflow deploys and verifies every push to \`main\`."
+              echo
+              echo "### Any server you already have"
+              echo "\`\`\`"
+              echo "docker run -d --restart=always -p 80:8080 \\\\"
+              echo "  -v datanest-data:/data \\\\"
+              echo "  -e DATANEST_ORIGIN=https://your.domain \\\\"
+              echo "  -e DATANEST_TRUST_PROXY=1 \\\\"
+              echo "  ghcr.io/${{ github.repository }}:latest"
+              echo "\`\`\`"
+              echo "Then put Caddy in front for automatic HTTPS."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Point at the image
+        run: |
+          echo "Image: ghcr.io/${{ github.repository }}:latest"
+          echo "Also tagged: ghcr.io/${{ github.repository }}:sha-${GITHUB_SHA:0:12}"
