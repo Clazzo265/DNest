@@ -36,6 +36,16 @@ import {
   type SessionUser,
 } from './auth';
 import { adapter, type Ctx, type Result } from './sdk';
+import {
+  ensureMember,
+  ensurePersonalWorkspace,
+  findInviteByToken,
+  getMember,
+  getWorkspace,
+  markInviteAccepted,
+  shortCodeFor,
+  type Role,
+} from '../backend/workspaces';
 
 const PORT = Number(process.env.PORT || 8080);
 const DATA_DIR = resolve(process.env.DATANEST_DATA_DIR || './data');
@@ -174,6 +184,83 @@ async function pruneSessions(): Promise<void> {
     .filter(row => row.expiresAt < now && row.__appdeploy_ddb_id)
     .map(row => row.__appdeploy_ddb_id);
   if (stale.length) await adapter.delete(SESSIONS_TABLE, stale);
+}
+
+// ---- workspaces -------------------------------------------------------------
+
+const ACTIVE_COOKIE = 'datanest_ws';
+
+/**
+ * Resolve which vault a request acts on.
+ *
+ * Order of preference:
+ *  1. `?ws=` query parameter (used by the client when switching)
+ *  2. the workspace cookie
+ *  3. the user's personal workspace
+ *
+ * The membership is re-checked on every request, so removing somebody takes
+ * effect immediately rather than at the next page load.
+ */
+async function resolveWorkspace(
+  user: SessionUser,
+  url: URL,
+  cookies: Record<string, string>
+): Promise<
+  | { ok: true; id: string; role: Role }
+  | { ok: false; reason: 'forbidden' }
+> {
+  const key = accountKey(user.userId);
+  const personal = await ensurePersonalWorkspace({
+    userId: user.userId,
+    accountKey: key,
+    name: user.name || user.email.split('@')[0],
+    email: user.email,
+  });
+
+  const explicit = url.searchParams.get('ws');
+  const cookieChoice = cookies[ACTIVE_COOKIE] || '';
+  const requested = explicit || cookieChoice;
+
+  const candidate = requested ? await getWorkspace(requested) : personal;
+
+  if (candidate) {
+    if (candidate.ownerId === user.userId) {
+      return { ok: true, id: candidate.id, role: 'owner' };
+    }
+    const member = await getMember(candidate.id, user.userId);
+    if (member) return { ok: true, id: candidate.id, role: member.role };
+  }
+
+  /**
+   * An explicit `?ws=` that the caller cannot reach is a hard error, not a
+   * reason to quietly serve a different vault. Silently substituting the
+   * personal vault meant a removed member got a 200 while acting on the wrong
+   * data - worse than failing, because it looks like it worked.
+   *
+   * A stale *cookie* is not an error: that is just a leftover preference, so it
+   * falls back to the personal vault.
+   */
+  if (explicit) return { ok: false, reason: 'forbidden' };
+  return { ok: true, id: personal.id, role: 'owner' };
+}
+
+/** Public invite details, so the join page can name the vault before sign-in. */
+async function invitePreview(workspaceId: string, token: string) {
+  const invite = await findInviteByToken(workspaceId, token);
+  if (!invite) return { valid: false as const, reason: 'not_found' as const };
+  if (invite.acceptedAt) return { valid: false as const, reason: 'used' as const };
+  if (Number(invite.expiresAt) < Date.now()) {
+    return { valid: false as const, reason: 'expired' as const };
+  }
+  const workspace = await getWorkspace(workspaceId);
+  return {
+    valid: true as const,
+    workspaceName: workspace?.name ?? 'Shared vault',
+    role: invite.role,
+    invitedEmail: invite.invitedEmail ?? null,
+    expiresAt: invite.expiresAt,
+    code: shortCodeFor(token),
+  };
 }
 
 // ---- API --------------------------------------------------------------------
@@ -341,19 +428,141 @@ async function handleApi(
   const authResult = await handleAuth(url.pathname, method, body, headers, cookies);
   if (authResult) return authResult;
 
+  const inviteResult = await handleInvite(url.pathname, method, cookies);
+  if (inviteResult) return inviteResult;
+
   const user = await currentUser(cookies);
 
-  const ctx: Ctx = {
+  const ctx: Ctx & { workspace?: { id: string; role: Role } } = {
     body,
     params: {},
     query: Object.fromEntries(url.searchParams.entries()),
-    user: user ? { userId: user.userId } : undefined,
+    user: user
+      ? { userId: user.userId, email: user.email, name: user.name }
+      : undefined,
+    workspace: undefined,
     headers,
     method,
     path: url.pathname,
   };
 
-  return (await vaultHandler(ctx)) as Result;
+  if (user) {
+    const workspace = await resolveWorkspace(user, url, cookies);
+    if (!workspace.ok) {
+      return {
+        statusCode: 403,
+        body: JSON.stringify({
+          error:
+            'You no longer have access to that vault. It may have been removed or you may have left it.',
+        }),
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+      };
+    }
+    ctx.workspace = { id: workspace.id, role: workspace.role };
+  }
+
+  return (await vaultHandler(ctx as never)) as Result;
+}
+
+/**
+ * Invite landing endpoint. Public by design: the join page has to tell a visitor
+ * which vault they were invited to *before* they have an account, otherwise the
+ * link is useless to somebody who is not already a user.
+ *
+ * It reveals only the vault name, the offered role and the expiry. Never the
+ * member list, never any content.
+ */
+async function handleInvite(
+  path: string,
+  method: string,
+  cookies: Record<string, string>
+): Promise<Result | null> {
+  const match = /^\/api\/invites\/([^/]+)\/([^/]+)$/.exec(path);
+  if (!match) return null;
+
+  const workspaceId = decodeURIComponent(match[1]);
+  const token = decodeURIComponent(match[2]);
+
+  if (method !== 'GET' && method !== 'POST') return null;
+
+  const preview = await invitePreview(workspaceId, token);
+  if (!preview.valid) {
+    return {
+      statusCode: 404,
+      body: JSON.stringify({
+        error:
+          preview.reason === 'expired'
+            ? 'This invite link has expired. Ask for a new one.'
+            : preview.reason === 'used'
+              ? 'This invite has already been used.'
+              : 'This invite link is not valid.',
+        reason: preview.reason,
+      }),
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+    };
+  }
+
+  if (method === 'GET') {
+    return {
+      statusCode: 200,
+      body: JSON.stringify(preview),
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+    };
+  }
+
+  // POST: accept. Requires a session.
+  const user = await currentUser(cookies);
+  if (!user) {
+    return {
+      statusCode: 401,
+      body: JSON.stringify({
+        error: 'Sign in or create an account to join this vault.',
+        needsAuth: true,
+      }),
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+    };
+  }
+
+  const invite = await findInviteByToken(workspaceId, token);
+  if (!invite) {
+    return {
+      statusCode: 404,
+      body: JSON.stringify({ error: 'This invite link is not valid.' }),
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+    };
+  }
+
+  await ensureMember({
+    workspaceId,
+    userId: user.userId,
+    email: user.email,
+    name: user.name,
+    role: invite.role,
+    invitedBy: invite.invitedBy,
+  });
+  await markInviteAccepted(workspaceId, invite, user.userId);
+
+  log('invite.accepted', { workspace: workspaceId, account: accountKey(user.userId) });
+
+  return {
+    statusCode: 200,
+    body: JSON.stringify({
+      joined: true,
+      workspaceId,
+      workspaceName: preview.workspaceName,
+      role: invite.role,
+    }),
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      // Land the new member in the vault they just joined.
+      'set-cookie':
+        ACTIVE_COOKIE +
+        '=' +
+        encodeURIComponent(workspaceId) +
+        '; Path=/; SameSite=Lax; Max-Age=2592000' +
+        (isSecure({}) ? '; Secure' : ''),
+    },
+  };
 }
 
 // ---- static ----------------------------------------------------------------

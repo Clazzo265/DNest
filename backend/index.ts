@@ -13,6 +13,27 @@ import {
   publicLimits,
 } from './limits';
 import {
+  canAdmin,
+  canWrite,
+  countOwners,
+  createInvite,
+  createWorkspace,
+  ensureMember,
+  getMember,
+  getWorkspace,
+  listInvites,
+  listMembers,
+  progressTableFor,
+  removeMember,
+  renameWorkspace,
+  revokeInvite,
+  updateMemberRole,
+  usageTableFor,
+  vaultTableFor,
+  workspacesForUser,
+  type Role,
+} from './workspaces';
+import {
   adjustRecords,
   commitReservation,
   mutateUsage,
@@ -22,7 +43,6 @@ import {
   releaseCommitted,
   releaseReservation,
   reserveBytes,
-  usageTableFor,
 } from './quota';
 import {
   RESUME_WINDOW,
@@ -31,18 +51,28 @@ import {
   deleteProgress,
   markParts,
   missingInWindow,
-  progressTableFor,
   readBitmap,
   summarize,
 } from './parts';
-import { deleteChunksFor, deleteStoredParts } from './chunks';
+import {
+  deleteChunksFor,
+  deleteStoredParts,
+  partStoragePath,
+} from './chunks';
 
 type RequestContext = {
   body: unknown;
   params: Record<string, string>;
   query: Record<string, string>;
-  user?: { userId: string };
+  user?: { userId: string; email?: string; name?: string };
+  /**
+   * The shared vault this request acts on. Resolved by the HTTP layer from the
+   * user's membership, so every table and storage path is scoped to a workspace
+   * rather than to the account that happens to be signed in.
+   */
+  workspace?: { id: string; role: Role };
 };
+
 
 type RecordInput = {
   kind?: string;
@@ -67,20 +97,36 @@ type ChunkBatchInput = {
 
 const BASE64_CHUNK_LIMIT = Math.ceil(CHUNK_SIZE / 3) * 4 + 8;
 
-function safeUserKey(userId: string): string {
-  return userId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 64);
+function workspaceId(ctx: RequestContext): string {
+  return ctx.workspace!.id;
 }
 
 function tableFor(ctx: RequestContext): string {
-  return 'vault_' + safeUserKey(ctx.user!.userId);
+  return vaultTableFor(workspaceId(ctx));
 }
 
 function usageTable(ctx: RequestContext): string {
-  return usageTableFor(safeUserKey(ctx.user!.userId));
+  return usageTableFor(workspaceId(ctx));
 }
 
 function progressTable(ctx: RequestContext): string {
-  return progressTableFor(safeUserKey(ctx.user!.userId));
+  return progressTableFor(workspaceId(ctx));
+}
+
+/** Write access is required for anything that changes a vault. */
+function requireWrite(ctx: RequestContext) {
+  return canWrite(ctx.workspace?.role ?? null)
+    ? null
+    : error(
+        'You have view-only access to this vault. Ask an owner for editor access.',
+        403
+      );
+}
+
+function requireAdmin(ctx: RequestContext) {
+  return canAdmin(ctx.workspace?.role ?? null)
+    ? null
+    : error('Only a vault owner can do that.', 403);
 }
 
 /**
@@ -106,12 +152,11 @@ async function loadBitmap(
 }
 
 function filePath(ctx: RequestContext, id: string, index: number): string {
-  return storagePath(safeUserKey(ctx.user!.userId), id, index);
+  return storagePath(workspaceId(ctx), id, index);
 }
 
-function storagePath(userKey: string, id: string, index: number): string {
-  const safeId = id.replace(/[^a-zA-Z0-9_-]/g, '');
-  return 'users/' + userKey + '/files/' + safeId + '/' + index + '.part';
+function storagePath(scope: string, id: string, index: number): string {
+  return partStoragePath(scope, id, index);
 }
 
 function cleanTags(value: unknown): string[] {
@@ -323,7 +368,7 @@ async function deleteRecord(ctx: RequestContext) {
     const freed = measured.received > 0 ? measured.bytes : Number(record.size) || 0;
 
     const chunkRemoval = await deleteChunksFor(
-      safeUserKey(ctx.user!.userId),
+      workspaceId(ctx),
       id,
       async () => {
         const indexes: number[] = [];
@@ -892,7 +937,7 @@ async function sweepStaleUploads(ctx: RequestContext) {
       }
       await deleteProgress(progressTable(ctx), id);
       const removal = await deleteStoredParts(
-        safeUserKey(ctx.user!.userId),
+        workspaceId(ctx),
         id,
         known
       );
@@ -917,15 +962,273 @@ async function sweepStaleUploads(ctx: RequestContext) {
   });
 }
 
+/**
+ * Everything the client needs to render the workspace switcher and control
+ * visibility: which vaults the user can reach, their role in each, and the
+ * published limits for the active one.
+ */
+async function listWorkspaces(ctx: RequestContext) {
+  const reachable = await workspacesForUser(ctx.user!.userId);
+  const current = workspaceId(ctx);
+
+  const summaries = [];
+  for (const workspace of reachable) {
+    const member = await getMember(workspace.id, ctx.user!.userId);
+    const role: Role =
+      workspace.ownerId === ctx.user!.userId ? 'owner' : (member?.role ?? 'viewer');
+    const usage = await readUsage(usageTableFor(workspace.id));
+    summaries.push({
+      id: workspace.id,
+      name: workspace.name,
+      kind: workspace.kind,
+      role,
+      ownerId: workspace.ownerId,
+      memberCount: (await listMembers(workspace.id)).length,
+      quota: quotaSnapshot(usage),
+    });
+  }
+
+  return json({
+    workspaces: summaries,
+    activeId: current,
+    role: ctx.workspace?.role ?? null,
+    limits: publicLimits(),
+  });
+}
+
+async function createSharedWorkspace(ctx: RequestContext) {
+  const body = ctx.body as { name?: unknown };
+  const name =
+    typeof body?.name === 'string' ? body.name.trim().slice(0, 80) : '';
+
+  if (!name) return error('Give the vault a name.', 400);
+
+  const existing = await workspacesForUser(ctx.user!.userId);
+  if (existing.length >= 20) {
+    return error('You already have 20 vaults, the maximum allowed.', 409);
+  }
+
+  const workspace = await createWorkspace({
+    kind: 'shared',
+    name,
+    ownerId: ctx.user!.userId,
+  });
+  await ensureMember({
+    workspaceId: workspace.id,
+    userId: ctx.user!.userId,
+    email: ctx.user!.email || '',
+    name: ctx.user!.name || '',
+    role: 'owner',
+  });
+
+  return json({ workspace }, 201);
+}
+
+async function workspaceMembers(ctx: RequestContext) {
+  const members = await listMembers(workspaceId(ctx));
+  const invites = canAdmin(ctx.workspace?.role ?? null)
+    ? await listInvites(workspaceId(ctx))
+    : [];
+
+  return json({
+    workspace: {
+      id: workspaceId(ctx),
+      role: ctx.workspace?.role ?? null,
+    },
+    members: members.map(member => ({
+      userId: member.userId,
+      email: member.email,
+      name: member.name,
+      role: member.role,
+      joinedAt: member.joinedAt,
+    })),
+    invites: invites.map(invite => ({
+      code: invite.tokenHash.slice(0, 12),
+      role: invite.role,
+      invitedEmail: invite.invitedEmail ?? null,
+      createdAt: invite.createdAt,
+      expiresAt: invite.expiresAt,
+    })),
+  });
+}
+
+/**
+ * Create an invite link.
+ *
+ * The raw token is returned exactly once, to the inviter, and never stored (only
+ * its hash is). That means a member list leak cannot be used to join a vault.
+ */
+async function createWorkspaceInvite(ctx: RequestContext) {
+  const denied = requireAdmin(ctx);
+  if (denied) return denied;
+
+  const body = ctx.body as { role?: unknown; email?: unknown };
+  const role: Role =
+    body?.role === 'viewer' ? 'viewer' : 'editor';
+
+  const email =
+    typeof body?.email === 'string' && body.email.trim()
+      ? body.email.trim().toLowerCase()
+      : undefined;
+
+  const { invite, token, code } = await createInvite({
+    workspaceId: workspaceId(ctx),
+    role,
+    invitedBy: ctx.user!.userId,
+    invitedEmail: email,
+  });
+
+  return json(
+    {
+      token,
+      code,
+      role: invite.role,
+      expiresAt: invite.expiresAt,
+      // Path is relative so the client builds an absolute URL for the public
+      // origin it is actually served from. It must match what the join page
+      // parses: /join/<workspaceId>/<token>.
+      path: '/join/' + workspaceId(ctx) + '/' + token,
+    },
+    201
+  );
+}
+
+async function revokeWorkspaceInvite(ctx: RequestContext) {
+  const denied = requireAdmin(ctx);
+  if (denied) return denied;
+
+  const code = String(ctx.params.code || '');
+  const removed = await revokeInvite(workspaceId(ctx), code);
+  if (!removed) return error('That invite is no longer active.', 404);
+  return json({ revoked: true });
+}
+
+async function changeMemberRole(ctx: RequestContext) {
+  const denied = requireAdmin(ctx);
+  if (denied) return denied;
+
+  const target = String(ctx.params.userId || '');
+  const body = ctx.body as { role?: unknown };
+  const role: Role | null =
+    body?.role === 'editor' || body?.role === 'viewer' || body?.role === 'owner'
+      ? body.role
+      : null;
+  if (!role) return error('Choose owner, editor or viewer.', 400);
+
+  const member = await getMember(workspaceId(ctx), target);
+  if (!member) return error('That person is not a member of this vault.', 404);
+
+  if (member.role === 'owner' && role !== 'owner') {
+    const owners = await countOwners(workspaceId(ctx));
+    if (owners <= 1) {
+      return error(
+        'A vault needs at least one owner. Make someone else an owner first.',
+        409
+      );
+    }
+  }
+
+  await updateMemberRole(workspaceId(ctx), target, role);
+  return json({ updated: true, role });
+}
+
+async function removeWorkspaceMember(ctx: RequestContext) {
+  const target = String(ctx.params.userId || '');
+  const self = target === ctx.user!.userId;
+
+  // Leaving is always allowed; removing someone else needs ownership.
+  if (!self) {
+    const denied = requireAdmin(ctx);
+    if (denied) return denied;
+  }
+
+  const member = await getMember(workspaceId(ctx), target);
+  if (!member) return error('That person is not a member of this vault.', 404);
+
+  const workspace = await getWorkspace(workspaceId(ctx));
+  if (workspace?.kind === 'personal') {
+    return error('This is a personal vault and cannot be left.', 409);
+  }
+  if (member.role === 'owner') {
+    const owners = await countOwners(workspaceId(ctx));
+    if (owners <= 1) {
+      return error(
+        'The last owner cannot leave. Make someone else an owner first.',
+        409
+      );
+    }
+  }
+
+  await removeMember(workspaceId(ctx), target);
+  return json({ removed: true, left: self });
+}
+
+async function renameActiveWorkspace(ctx: RequestContext) {
+  const denied = requireAdmin(ctx);
+  if (denied) return denied;
+  const body = ctx.body as { name?: unknown };
+  const name = typeof body?.name === 'string' ? body.name.trim().slice(0, 80) : '';
+  if (!name) return error('Give the vault a name.', 400);
+  await renameWorkspace(workspaceId(ctx), name);
+  return json({ renamed: true, name });
+}
+
 export const handler = router({
+  // Workspaces and membership
+  'GET /api/workspaces': [requireAuth(), async ctx => listWorkspaces(ctx)],
+  'POST /api/workspaces': [requireAuth(), async ctx => createSharedWorkspace(ctx)],
+  'GET /api/workspace': [requireAuth(), async ctx => workspaceMembers(ctx)],
+  'PATCH /api/workspace': [requireAuth(), async ctx => renameActiveWorkspace(ctx)],
+  'POST /api/workspace/invites': [
+    requireAuth(),
+    async ctx => createWorkspaceInvite(ctx),
+  ],
+  'DELETE /api/workspace/invites/:code': [
+    requireAuth(),
+    async ctx => revokeWorkspaceInvite(ctx),
+  ],
+  'PATCH /api/workspace/members/:userId': [
+    requireAuth(),
+    async ctx => changeMemberRole(ctx),
+  ],
+  'DELETE /api/workspace/members/:userId': [
+    requireAuth(),
+    async ctx => removeWorkspaceMember(ctx),
+  ],
+
+  // Vault (scoped to the active workspace)
   'GET /api/vault': [requireAuth(), async ctx => vaultStatus(ctx)],
-  'POST /api/vault/reconcile': [requireAuth(), async ctx => reconcileVault(ctx)],
-  'POST /api/vault/sweep': [requireAuth(), async ctx => sweepStaleUploads(ctx)],
+  'POST /api/vault/reconcile': [
+    requireAuth(),
+    requireWrite,
+    async ctx => reconcileVault(ctx),
+  ],
+  'POST /api/vault/sweep': [
+    requireAuth(),
+    requireWrite,
+    async ctx => sweepStaleUploads(ctx),
+  ],
   'GET /api/records': [requireAuth(), async ctx => listRecords(ctx)],
-  'POST /api/records': [requireAuth(), async ctx => createRecord(ctx)],
-  'PUT /api/records/:id': [requireAuth(), async ctx => updateRecord(ctx)],
-  'DELETE /api/records/:id': [requireAuth(), async ctx => deleteRecord(ctx)],
-  'POST /api/files/start': [requireAuth(), async ctx => startFileUpload(ctx)],
+  'POST /api/records': [
+    requireAuth(),
+    requireWrite,
+    async ctx => createRecord(ctx),
+  ],
+  'PUT /api/records/:id': [
+    requireAuth(),
+    requireWrite,
+    async ctx => updateRecord(ctx),
+  ],
+  'DELETE /api/records/:id': [
+    requireAuth(),
+    requireWrite,
+    async ctx => deleteRecord(ctx),
+  ],
+  'POST /api/files/start': [
+    requireAuth(),
+    requireWrite,
+    async ctx => startFileUpload(ctx),
+  ],
   'GET /api/files/:id/status': [
     requireAuth(),
     async ctx => getUploadStatus(ctx),
@@ -934,6 +1237,7 @@ export const handler = router({
   // captured as a part number.
   'POST /api/files/:id/chunks': [
     requireAuth(),
+    requireWrite,
     async ctx => uploadChunkBatch(ctx),
   ],
   'POST /api/files/:id/chunks/read': [
@@ -942,10 +1246,12 @@ export const handler = router({
   ],
   'POST /api/files/:id/chunks/:index': [
     requireAuth(),
+    requireWrite,
     async ctx => uploadFileChunk(ctx),
   ],
   'POST /api/files/:id/complete': [
     requireAuth(),
+    requireWrite,
     async ctx => completeFileUpload(ctx),
   ],
   'GET /api/files/:id/chunks/:index': [

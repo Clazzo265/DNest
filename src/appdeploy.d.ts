@@ -29,10 +29,78 @@ declare module '@appdeploy/client' {
       options?: { signal?: AbortSignal }
     ): Promise<ApiResponse<T>>;
     put<T = any>(url: string, body?: unknown): Promise<ApiResponse<T>>;
+    patch<T = any>(url: string, body?: unknown): Promise<ApiResponse<T>>;
     delete<T = any>(url: string): Promise<ApiResponse<T>>;
   };
 
   export type AppUser = { userId: string; email: string; name: string };
+
+  export type WorkspaceSummary = {
+    id: string;
+    name: string;
+    kind: 'personal' | 'shared';
+    role: 'owner' | 'editor' | 'viewer';
+    ownerId: string;
+    memberCount: number;
+    quota: {
+      quotaBytes: number;
+      usedBytes: number;
+      reservedBytes: number;
+      remainingBytes: number;
+      percentUsed: number;
+      fileCount: number;
+      recordCount: number;
+    };
+  };
+
+  export const workspaces: {
+    list(): Promise<{
+      workspaces: WorkspaceSummary[];
+      activeId: string;
+      role: 'owner' | 'editor' | 'viewer' | null;
+    }>;
+    create(name: string): Promise<WorkspaceSummary>;
+    rename(name: string): Promise<void>;
+    members(ws?: string): Promise<{
+      members: {
+        userId: string;
+        email: string;
+        name: string;
+        role: 'owner' | 'editor' | 'viewer';
+        joinedAt: string;
+      }[];
+      invites: {
+        code: string;
+        role: string;
+        invitedEmail: string | null;
+        createdAt: string;
+        expiresAt: number;
+      }[];
+    }>;
+    invite(input: {
+      role: 'editor' | 'viewer';
+      email?: string;
+    }): Promise<{ token: string; code: string; path: string; expiresAt: number }>;
+    revokeInvite(code: string): Promise<void>;
+    setRole(
+      userId: string,
+      role: 'owner' | 'editor' | 'viewer'
+    ): Promise<void>;
+    removeMember(userId: string): Promise<void>;
+    invitePreview(
+      workspaceId: string,
+      token: string
+    ): Promise<{
+      workspaceName: string;
+      role: 'owner' | 'editor' | 'viewer';
+      invitedEmail: string | null;
+      expiresAt: number;
+    }>;
+    acceptInvite(
+      workspaceId: string,
+      token: string
+    ): Promise<{ workspaceId: string; workspaceName: string; role: string }>;
+  };
 
   export const auth: {
     getUser(): Promise<unknown>;

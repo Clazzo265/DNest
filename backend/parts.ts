@@ -66,8 +66,8 @@ export type Progress = {
   complete: boolean;
 };
 
-export function progressTableFor(userKey: string): string {
-  return PROGRESS_TABLE_PREFIX + userKey;
+export function progressTableFor(workspaceId: string): string {
+  return PROGRESS_TABLE_PREFIX + workspaceId;
 }
 
 export function shardOf(index: number): number {

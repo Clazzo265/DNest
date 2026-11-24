@@ -83,10 +83,131 @@ export const api = {
   put: <T = any>(url: string, body?: unknown) =>
     send<T>(url, { method: 'PUT', body: JSON.stringify(body ?? {}) }),
 
+  patch: <T = any>(url: string, body?: unknown) =>
+    send<T>(url, { method: 'PATCH', body: JSON.stringify(body ?? {}) }),
+
   delete: <T = any>(url: string) => send<T>(url, { method: 'DELETE' }),
 };
 
 export type AppUser = { userId: string; email: string; name: string };
+
+export type WorkspaceSummary = {
+  id: string;
+  name: string;
+  kind: 'personal' | 'shared';
+  role: 'owner' | 'editor' | 'viewer';
+  ownerId: string;
+  memberCount: number;
+  quota: {
+    quotaBytes: number;
+    usedBytes: number;
+    reservedBytes: number;
+    remainingBytes: number;
+    percentUsed: number;
+    fileCount: number;
+    recordCount: number;
+  };
+};
+
+export const workspaces = {
+  async list(): Promise<{
+    workspaces: WorkspaceSummary[];
+    activeId: string;
+    role: 'owner' | 'editor' | 'viewer' | null;
+  }> {
+    const response = await api.get('/api/workspaces');
+    return response.data;
+  },
+
+  async create(name: string): Promise<WorkspaceSummary> {
+    const response = await api.post('/api/workspaces', { name });
+    return response.data.workspace;
+  },
+
+  async rename(name: string): Promise<void> {
+    await api.patch('/api/workspace', { name });
+  },
+
+  async members(ws?: string): Promise<{
+    members: {
+      userId: string;
+      email: string;
+      name: string;
+      role: 'owner' | 'editor' | 'viewer';
+      joinedAt: string;
+    }[];
+    invites: {
+      code: string;
+      role: string;
+      invitedEmail: string | null;
+      createdAt: string;
+      expiresAt: number;
+    }[];
+  }> {
+    const response = await api.get(
+      ws ? '/api/workspace?ws=' + encodeURIComponent(ws) : '/api/workspace'
+    );
+    return response.data;
+  },
+
+  async invite(input: {
+    role: 'editor' | 'viewer';
+    email?: string;
+  }): Promise<{ token: string; code: string; path: string; expiresAt: number }> {
+    const response = await api.post('/api/workspace/invites', input);
+    return response.data;
+  },
+
+  async revokeInvite(code: string): Promise<void> {
+    await api.delete('/api/workspace/invites/' + encodeURIComponent(code));
+  },
+
+  async setRole(
+    userId: string,
+    role: 'owner' | 'editor' | 'viewer'
+  ): Promise<void> {
+    await api.patch(
+      '/api/workspace/members/' + encodeURIComponent(userId),
+      { role }
+    );
+  },
+
+  async removeMember(userId: string): Promise<void> {
+    await api.delete('/api/workspace/members/' + encodeURIComponent(userId));
+  },
+
+  async invitePreview(
+    workspaceId: string,
+    token: string
+  ): Promise<{
+    workspaceName: string;
+    role: 'owner' | 'editor' | 'viewer';
+    invitedEmail: string | null;
+    expiresAt: number;
+  }> {
+    const response = await api.get(
+      '/api/invites/' +
+        encodeURIComponent(workspaceId) +
+        '/' +
+        encodeURIComponent(token)
+    );
+    return response.data;
+  },
+
+  async acceptInvite(
+    workspaceId: string,
+    token: string
+  ): Promise<{ workspaceId: string; workspaceName: string; role: string }> {
+    const response = await api.post(
+      '/api/invites/' +
+        encodeURIComponent(workspaceId) +
+        '/' +
+        encodeURIComponent(token),
+      {}
+    );
+    return response.data;
+  },
+};
 
 export const auth = {
   /** Returns the signed-in user, or null. Never throws for an anonymous visitor. */

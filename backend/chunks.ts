@@ -14,20 +14,31 @@ const DELETE_BATCH = 100;
 
 const DELETE_CONCURRENCY = 4;
 
+/**
+ * Single source of truth for part storage paths.
+ *
+ * This used to be duplicated between here and `backend/index.ts`. When storage
+ * moved from per-user to per-workspace the copy here was missed, so deletes
+ * pointed at paths that no longer existed and reported failure. One function,
+ * imported by everyone, is the fix.
+ */
 export function partStoragePath(
-  userKey: string,
+  workspaceId: string,
   fileId: string,
   index: number
 ): string {
+  const safeScope = workspaceId.replace(/[^a-zA-Z0-9_-]/g, '');
   const safeId = fileId.replace(/[^a-zA-Z0-9_-]/g, '');
-  return 'users/' + userKey + '/files/' + safeId + '/' + index + '.part';
+  return (
+    'workspaces/' + safeScope + '/files/' + safeId + '/' + index + '.part'
+  );
 }
 
 export type RemoveResult = { deleted: number; failed: boolean };
 
 /** Remove the stored objects for the given part indexes. */
 export async function deleteStoredParts(
-  userKey: string,
+  workspaceScope: string,
   fileId: string,
   indexes: number[]
 ): Promise<RemoveResult> {
@@ -47,7 +58,9 @@ export async function deleteStoredParts(
       const batch = batches[cursor];
       cursor += 1;
       if (!batch) return;
-      const paths = batch.map(index => partStoragePath(userKey, fileId, index));
+      const paths = batch.map(index =>
+        partStoragePath(workspaceScope, fileId, index)
+      );
       try {
         const results = await storage.delete(paths);
         deleted += results.filter(Boolean).length;
@@ -73,13 +86,13 @@ export async function deleteStoredParts(
  * index is stored.
  */
 export async function deleteChunksFor(
-  userKey: string,
+  workspaceScope: string,
   fileId: string,
   discoverIndexes: () => Promise<number[]>
 ): Promise<RemoveResult> {
   try {
     const indexes = await discoverIndexes();
-    return await deleteStoredParts(userKey, fileId, indexes);
+    return await deleteStoredParts(workspaceScope, fileId, indexes);
   } catch {
     return { deleted: 0, failed: true };
   }

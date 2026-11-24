@@ -13,7 +13,9 @@ export type Ctx = {
   body: unknown;
   params: Record<string, string>;
   query: Record<string, string>;
-  user?: { userId: string };
+  user?: { userId: string; email?: string; name?: string };
+  /** Active shared vault and the caller's role in it. */
+  workspace?: { id: string; role: 'owner' | 'editor' | 'viewer' };
   headers: Record<string, string>;
   method: string;
   path: string;

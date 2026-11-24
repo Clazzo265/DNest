@@ -1,8 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import JSZip from 'jszip';
-import { api, auth } from '@appdeploy/client';
+import { api, auth, workspaces } from '@appdeploy/client';
+import {
+  MembersPanel,
+  inviteMessage,
+  inviteUrl,
+  isUnreachableLink,
+  whatsappShareUrl,
+} from './Members';
 import {
   Archive,
+  Building2,
   ArrowDownToLine,
   ArrowUpFromLine,
   Check,
@@ -23,7 +31,9 @@ import {
   LoaderCircle,
   LogOut,
   Menu,
+  MessageCircle,
   MoreHorizontal,
+  Users,
   Pause,
   Pencil,
   Plus,
@@ -160,6 +170,19 @@ function App() {
   const [jobs, setJobs] = useState<TransferJob[]>([]);
   const [activeJob, setActiveJob] = useState('');
   const [quota, setQuota] = useState<Quota | null>(null);
+  const [vaults, setVaults] = useState<
+    Awaited<ReturnType<typeof workspaces.list>>['workspaces']
+  >([]);
+  const [activeVault, setActiveVault] = useState('');
+  const [myRole, setMyRole] = useState<'owner' | 'editor' | 'viewer' | null>(null);
+  const [membersOpen, setMembersOpen] = useState(false);
+  const [newVaultOpen, setNewVaultOpen] = useState(false);
+  const [newVaultName, setNewVaultName] = useState('');
+  const [vaultBusy, setVaultBusy] = useState(false);
+  const [quickInvite, setQuickInvite] = useState<{
+    url: string;
+    vaultName: string;
+  } | null>(null);
   const [limits, setLimits] = useState<Limits | null>(null);
   const [downloadState, setDownloadState] = useState<{
     id: string;
@@ -183,6 +206,72 @@ function App() {
       setLimits(state.limits);
     } catch {
       /* quota display is non-critical; records still work */
+    }
+  }
+
+  /** Workspace list plus the caller's role; drives the switcher and permissions. */
+  async function refreshWorkspaces() {
+    try {
+      const state = await workspaces.list();
+      setVaults(state.workspaces || []);
+      setActiveVault(state.activeId || state.workspaces[0]?.id || '');
+      setMyRole(state.role);
+    } catch {
+      /* leave the current view intact */
+    }
+  }
+
+  const canEdit = myRole === 'owner' || myRole === 'editor';
+  const isOwner = myRole === 'owner';
+
+  async function switchVault(id: string) {
+    if (id === activeVault) return;
+    // The cookie keeps the choice across reloads; the query param makes this
+    // request itself act on the right vault.
+    document.cookie =
+      'datanest_ws=' + encodeURIComponent(id) + '; Path=/; SameSite=Lax; Max-Age=2592000';
+    setActiveVault(id);
+    setRecords([]);
+    setSelected(null);
+    setQuery('');
+    setActiveFolder('');
+    await Promise.all([refreshRecords(), refreshVault(), refreshWorkspaces()]);
+    setToast('Switched vault.');
+  }
+
+  async function createVault() {
+    const name = newVaultName.trim();
+    if (!name) return;
+    setVaultBusy(true);
+    try {
+      const created = await workspaces.create(name);
+      setNewVaultName('');
+      setNewVaultOpen(false);
+      await refreshWorkspaces();
+      await switchVault(created.id);
+      setToast('Shared vault created. Invite someone to it.');
+    } catch (error) {
+      setToast(getErrorMessage(error));
+    } finally {
+      setVaultBusy(false);
+    }
+  }
+
+  /**
+   * One-click invite: the sidebar action most people actually want. Creates a
+   * link and shows it with a WhatsApp button rather than opening a dialog first.
+   */
+  async function quickInviteLink() {
+    try {
+      const invite = await workspaces.invite({ role: 'editor' });
+      const current = vaults.find(vault => vault.id === activeVault);
+      setQuickInvite({
+        url: inviteUrl(activeVault, invite.token),
+        vaultName: current?.name || 'my DataNest vault',
+      });
+      await refreshWorkspaces();
+    } catch (error) {
+      setToast(getErrorMessage(error));
     }
   }
 
@@ -230,7 +319,13 @@ function App() {
         if (!active) return;
         setUser(restored);
         setAuthLoading(false);
-        if (restored) await Promise.all([refreshRecords(), refreshVault()]);
+        if (restored) {
+          await Promise.all([
+            refreshRecords(),
+            refreshVault(),
+            refreshWorkspaces(),
+          ]);
+        }
       } catch (error) {
         if (!active) return;
         setAuthError(getErrorMessage(error));
@@ -1006,6 +1101,63 @@ function App() {
           </button>
         </div>
 
+        <div className="vault-switcher">
+          <label className="vault-select-label">
+            <span>VAULT</span>
+            <div className="vault-select-row">
+              <select
+                className="vault-select"
+                value={activeVault}
+                onChange={event => void switchVault(event.target.value)}
+                aria-label="Choose vault"
+              >
+                {vaults.map(vault => (
+                  <option key={vault.id} value={vault.id}>
+                    {vault.name}
+                    {vault.kind === 'shared'
+                      ? ' · ' + vault.memberCount + ' members'
+                      : ' · private'}
+                  </option>
+                ))}
+              </select>
+              {myRole && (
+                <span className={'role-badge role-' + myRole}>
+                  {myRole === 'owner'
+                    ? 'Owner'
+                    : myRole === 'editor'
+                      ? 'Editor'
+                      : 'Viewer'}
+                </span>
+              )}
+            </div>
+          </label>
+          <div className="vault-actions">
+            {isOwner && (
+              <button
+                className="ghost-button vault-action"
+                onClick={() => void quickInviteLink()}
+                title="Create an invite link to share"
+              >
+                <Users size={13} /> Invite
+              </button>
+            )}
+            <button
+              className="ghost-button vault-action"
+              onClick={() => setMembersOpen(true)}
+              title="Members and invites"
+            >
+              <Users size={13} /> Members
+            </button>
+            <button
+              className="ghost-button vault-action"
+              onClick={() => setNewVaultOpen(true)}
+              title="Create a shared vault"
+            >
+              <Building2 size={13} /> New
+            </button>
+          </div>
+        </div>
+
         <div className="workspace-label">WORKSPACE</div>
         <nav className="side-nav">
           <button
@@ -1348,18 +1500,21 @@ function App() {
                 <button
                   className="action-button"
                   onClick={() => openComposer('note')}
+                  disabled={!canEdit}
                 >
                   <Plus size={16} /> Note
                 </button>
                 <button
                   className="action-button"
                   onClick={() => openComposer('json')}
+                  disabled={!canEdit}
                 >
                   <Code2 size={16} /> JSON
                 </button>
                 <button
                   className="action-button upload-action"
                   onClick={() => fileInput.current?.click()}
+                  disabled={!canEdit}
                 >
                   <Upload size={16} /> Upload
                 </button>
@@ -2025,6 +2180,152 @@ function App() {
               </button>
             </div>
           </section>
+        </div>
+      )}
+
+      {membersOpen && (
+        <div
+          className="modal-backdrop"
+          onMouseDown={event => {
+            if (event.target === event.currentTarget) setMembersOpen(false);
+          }}
+        >
+          <section className="modal members-modal">
+            <div className="modal-heading">
+              <div>
+                <span className="eyebrow">SHARING</span>
+                <h2>
+                  {vaults.find(vault => vault.id === activeVault)?.name ||
+                    'This vault'}
+                </h2>
+              </div>
+              <button
+                className="icon-button"
+                onClick={() => setMembersOpen(false)}
+                aria-label="Close"
+              >
+                <X size={19} />
+              </button>
+            </div>
+            {myRole ? (
+              <MembersPanel
+                api={workspaces}
+                workspaceId={activeVault}
+                vaultName={
+                  vaults.find(vault => vault.id === activeVault)?.name ||
+                  'my DataNest vault'
+                }
+                currentUserId={user?.userId || ''}
+                currentRole={myRole}
+                onToast={setToast}
+                onChanged={() => void refreshWorkspaces()}
+              />
+            ) : (
+              <p className="hint-text">Loading membership…</p>
+            )}
+          </section>
+        </div>
+      )}
+
+      {newVaultOpen && (
+        <div
+          className="modal-backdrop"
+          onMouseDown={event => {
+            if (event.target === event.currentTarget) setNewVaultOpen(false);
+          }}
+        >
+          <section className="modal confirm-modal">
+            <div className="confirm-symbol">
+              <Building2 size={22} />
+            </div>
+            <h2>Create a shared vault</h2>
+            <p>
+              A separate space you can invite people into. Your personal vault
+              stays private and is never shared.
+            </p>
+            <label className="field-label">
+              Vault name
+              <input
+                autoFocus
+                value={newVaultName}
+                onChange={event => setNewVaultName(event.target.value)}
+                placeholder="e.g. Family photos, Team docs"
+                maxLength={80}
+                onKeyDown={event => {
+                  if (event.key === 'Enter') void createVault();
+                }}
+              />
+            </label>
+            <div className="modal-actions">
+              <button
+                className="secondary-button"
+                onClick={() => setNewVaultOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="primary-button"
+                onClick={() => void createVault()}
+                disabled={vaultBusy || !newVaultName.trim()}
+              >
+                {vaultBusy ? (
+                  <LoaderCircle size={16} className="spin" />
+                ) : (
+                  <Plus size={16} />
+                )}
+                {vaultBusy ? 'Creating…' : 'Create vault'}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {quickInvite && (
+        <div className="invite-toast">
+          <div className="invite-toast-head">
+            <MessageCircle size={16} />
+            <strong>Invite link ready</strong>
+            <button
+              className="icon-button"
+              onClick={() => setQuickInvite(null)}
+              aria-label="Dismiss"
+            >
+              <X size={14} />
+            </button>
+          </div>
+          <code className="invite-link">{quickInvite.url}</code>
+          {isUnreachableLink(quickInvite.url) && (
+            <p className="invite-warning">
+              This is a localhost address — it only opens on this machine. Use the
+              deployed address to invite people over WhatsApp.
+            </p>
+          )}
+          <div className="invite-actions">
+            <button
+              className="ghost-button"
+              onClick={() => {
+                void navigator.clipboard
+                  .writeText(quickInvite.url)
+                  .then(() => setToast('Link copied.'))
+                  .catch(() => setToast('Copy failed — select the link.'));
+              }}
+            >
+              Copy link
+            </button>
+            <a
+              className="whatsapp-button"
+              href={whatsappShareUrl(
+                inviteMessage(quickInvite.vaultName, quickInvite.url)
+              )}
+              target="_blank"
+              rel="noreferrer noopener"
+            >
+              <MessageCircle size={15} /> WhatsApp
+            </a>
+          </div>
+          <span className="invite-toast-note">
+            Works once · expires in 7 days · recipients can create an account
+          </span>
         </div>
       )}
 
